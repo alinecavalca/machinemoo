@@ -1,0 +1,49 @@
+site_name: MachineMOO
+site_description: A Python package for multi-objective optimization with scalarization and analysis tools
+site_author: Aline Azevedo
+repo_url: https://github.com/alinecavalca/machinemoo
+edit_uri: edit/dev/
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.integrate
+    - content.code.annotate
+    - content.tabs.link
+  palette:
+    scheme: default
+    primary: teal
+    accent: pink
+
+nav:
+  - Home: index.md
+  - Multi-Objective Optimization (moo): moo.md
+  - Scalarization: scalarization.md
+  - Analysis Tools: analysis.md
+  - Utilities: utils.md
+  - API Reference: api.md
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - admonition
+  - codehilite
+  - footnotes
+  - tables
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.emoji
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["machinemoo"]
