@@ -13,49 +13,61 @@ Reference:
     arXiv
 """
 # License: BSD 3 clause
-import numpy as np
-import copy
-import logging
-import time
 import mip
+import copy
+import time
+import logging
+import numpy as np
+import numpy.typing as npt
 
+from machinemoo.utils.typing import scalar
+from machinemoo.utils.logging_config import logger
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
 
 __all__ = [
     "monise"
 ]
 
-
-logger = logging.getLogger(__name__)
-logger.setLevel(level=logging.DEBUG)
-
-MAXINT = 200000000000000
-
-# -*- coding: utf-8 -*-
-"""
-Many Objective Noninferior Estimation utils
-
-Author: Marcos M. Raimundo <marcosmrai@gmail.com>
-        Laboratory of Bioinformatics and Bioinspired Computing
-        FEEC - University of Campinas
-
-Reference:
-    Raimundo, Marcos M.
-    MONISE - Many Objective Noninferior Estimation
-    2017
-    arXiv
-"""
-# License: BSD 3 clause
-
-import copy
-import mip
-import numpy as np
-
+#MAXINT = 200000000000000
 MAXINT = 2000000000
 
 class weight_solv():
-    def __init__(self, solutionsList, globalL, globalU, weightedScalar,
-                 goal=float('inf'), time_limit=10, mip_gap=0.01, norm=False):
+    """Solves a scalarization weight optimization problem for multi-objective learning.
+    
+    This class estimates a new weighting vector based on an existing
+    list of scalarized solutions.
+    """
+    def __init__(
+        self,
+        solutionsList: list[scalar],
+        globalL: npt.NDArray[np.float64],
+        globalU: npt.NDArray[np.float64],
+        weightedScalar: scalar,
+        goal: float = float('inf'),
+        time_limit: float = 10.0,
+        mip_gap: float = 0.01, 
+        norm: bool = False
+    ) -> None:
+        """Initialize the weight solver for multi-objective optimization.
+
+        Args:
+            solutionsList (list[scalar]): 
+                List of scalarized solutions representing the current approximation of the Pareto frontier.
+            globalL (npt.NDArray[np.float64]): 
+                Lower bounds for each objective (typically the utopia point).
+            globalU (npt.NDArray[np.float64]): 
+                Upper bounds for each objective (typically the nadir point).
+            weightedScalar (scalar): 
+                Scalarization object used to optimize with the new weight vector.
+            goal (float): 
+                Target importance value to reach. Defaults to infinity.
+            time_limit (float): 
+                Maximum time (in seconds) allowed for solving the internal optimization problem. Defaults to 10.0.
+            mip_gap (float): 
+                Acceptable optimality gap for solving the internal mixed-integer programming problem. Defaults to 0.01.
+            norm (bool): 
+                Whether to normalize the objective space based on `globalL` and `globalU`. Defaults to False.
+        """
         self.__weightedScalar = weightedScalar
         self.__M = solutionsList[0].M
         self.__globalL, self.__globalU = globalL, globalU
@@ -64,17 +76,28 @@ class weight_solv():
         self.__time_limit = time_limit
         self.__mip_gap = mip_gap
         self.__norm = norm
+        self.best_solution_reached = False
         if len(self.solutionsList) == self.M:
             self.__calcFirstW()
         else:
             self.__calcW(goal=goal)
 
     @property
-    def M(self):
+    def M(self) -> int:
+        """Number of objective functions.
+
+        Returns:
+            int: The number of objectives.
+        """
         return self.__M
 
     @property
-    def importance(self):
+    def importance(self) -> float:
+        """Importance score computed from the separation margin optimization.
+
+        Returns:
+            float: The separation margin between upper and lower bounds.
+        """
         return self.__importance
 
     #@property
@@ -82,36 +105,102 @@ class weight_solv():
     #    return self.__parents
 
     @property
-    def solution(self):
+    def solution(self) -> scalar:
+        """The current optimized solution.
+
+        Returns:
+            scalar: The best solution found using the computed weights.
+        """
         return self.__solution
 
     @property
-    def w(self):
+    def w(self) -> npt.NDArray[np.float64]:
+        """The weight vector obtained from the MILP optimization.
+
+        Returns:
+            np.ndarray: The vector of weights for scalarization.
+        """
         return self.__w
 
-    def optimize(self, hotstart=None):
-        self.__solution = copy.copy(self.__weightedScalar)
-        try:
-            self.__solution.optimize(self.w, [])
-        except:
-            self.__solution.optimize(self.w)
+    def optimize(self, hotstart: list[scalar] = []) -> scalar:
+        """Optimize using the weighted scalar method.
+
+        Args:
+            hotstart (list[scalar]): Initial solution.
+
+        Returns:
+            scalar: Optimized solution for this weight vector.
+        """
+        #self.__solution = copy.copy(self.__weightedScalar)
+        #try:
+        #    self.__solution.optimize(self.w, [])
+        #except:
+        #    self.__solution.optimize(self.w)
+        #return self.__solution
+        best_solution = np.zeros(self.M)
+        best_objective = np.inf
+
+        for solution in self.solutionsList:
+            aux = self.w@solution.objs
+            if aux < best_objective:
+                best_objective = aux
+                best_solution = solution
+
+        self.__solution = copy.copy(best_solution)
+        self.__solution.optimize(self.w)
+        self.ml_model = self.__solution.x
+        if np.all(np.equal(self.__solution.objs, best_solution.objs)):
+           self.best_solution_reached = True
         return self.__solution
 
-    def __normf(self, obj):
+    def __normf(self, obj: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Normalize the objectives
+
+        Args:
+            objs (np.ndarray): Objective vector to be normalized
+        
+        Returns:
+            np.ndarray: Normalized objective vector
+        """
         if self.__norm:
             return (obj-self.__globalL)/(self.__globalU-self.__globalL)
         else:
             return (obj-self.__globalL)
 
-    def __normw(self, w):
+    def __normw(self, w: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Normalize the weights
+
+        Args:
+            w (np.ndarray): Weighting vector, ponderates the objectives of the
+                            weighted sum method.
+
+        Returns:
+            np.ndarray: Normalized weighting vector if normalization is True
+        """
         if self.__norm:
             w_ = w*(self.__globalU-self.__globalL)
             return w_/w_.sum()
         else:
             return w
 
-    def __calcD(self, solT, solList=None):
+    def __calcD(
+        self,
+        solT: scalar,
+        solList: list[scalar] | None = None
+    ) -> tuple[float, list[float]]:
+        """Compute the maximum normalized objective-wise distance between the
+        target solution and a list of reference solutions.
 
+        Args:
+            solT (scalar): The target solution to compare against.
+            solList (list[scalar], optional): List of solutions for comparison.
+                If None, defaults to `self.solutionsList`.
+
+        Returns:
+            tuple[float, list[float]]: A tuple containing:
+                - The maximum distance (float) between `solT` and the list.
+                - A list of individual distances (list[float]) for each solution.
+        """
         if solList is None:
             solList = self.solutionsList
 
@@ -121,7 +210,22 @@ class weight_solv():
 
         return value, vec
 
-    def __calcFirstW(self, goal=1, eps=0.00):
+    def __calcFirstW(
+        self,
+        goal: float = 1.0,
+        eps: float = 0.00
+    ) -> None:
+        """Solve a linear optimization problem to compute the first weight
+        vector (w) based on individual objective-optimal solutions.
+        Assumes that the number of solutions is equal to the number of objectives.
+
+        Args:
+            goal (float): A target value for the objective. Default is 1.0.
+            eps (float): Tolerance value for constraint relaxation. Default is 0.00.
+
+        Raises:
+            Exception: If the solver fails to find a feasible solution.
+        """
         oidx = [i for i in range(self.M)]
         Nsols = len(self.solutionsList)
         assert self.M == Nsols, 'only fist W'
@@ -183,7 +287,20 @@ class weight_solv():
         else:
             raise('Somethig wrong')
 
-    def __calcW(self, goal=1, eps=0.00):
+    def __calcW(self,
+        goal: float = 1.0,
+        eps: float = 0.00
+    ) -> None:
+        """ Solve a mixed-integer linear program (MILP) to compute an updated
+        weighting vector (w) based on the current list of solutions. 
+
+        Args:
+            goal (float): A target value for the objective. Default is 1.0.
+            eps (float): Constraint relaxation tolerance. Default is 0.00.
+
+        Raises:
+            Exception: If no feasible solution is found during optimization.
+        """
         oidx = [i for i in range(self.M)]
         Nsols = len(self.solutionsList)
         # Create a gurobi model
@@ -297,10 +414,45 @@ class weight_solv():
 
 
 class monise():
-    def __init__(self, weightedScalar, singleScalar, targetGap=0.0,
-                 targetSize=None, redFact=float('inf'), smoothCount=None,
-                 nodeTimeLimit=float('inf'), nodeGap=0.01, hotstart=[],
-                 norm=True):
+    """MONISE: Many-Objective Non-Inferior Set Estimation.
+    
+    This algorithm incrementally constructs a Pareto frontier approximation by solving a
+    sequence of weighted scalarization problems. It maintains and updates a candidate 
+    list based on weight importance, improving the frontier coverage over time.
+    """
+    def __init__(
+        self,
+        weightedScalar: scalar,
+        singleScalar: scalar,
+        targetGap: float = 0.0,
+        targetSize: int | None = None,
+        redFact: float = float('inf'),
+        smoothCount: int | None = None,
+        nodeTimeLimit: float = float('inf'),
+        nodeGap: float = 0.01,
+        hotstart: list[scalar] = [],
+        norm: bool = True
+        ) -> None:
+        """Initializes MONISE class
+
+        Args:
+            weightedScalar (scalar): An instance of a class solving the weighted scalarization
+            singleScalar (scalar): An instance of a class solving single-objective problems.
+            targetGap (float): Termination criterion based on importance ratio. Default is 0.0
+            targetSize (int): Desired number of Pareto solutions.
+                Defaults to 20 × number of objectives if not specified.
+            redFact (float): Reduction factor used in adaptive refinement. Default is infinity.
+            smoothCount (int): Number of smoothing iterations before stopping. Default is 0.
+            nodeTimeLimit (float): Maximum time allowed (in seconds) per node optimization.
+                Default is infinity.
+            nodeGap (float): Acceptable optimization gap for each node. Default is 0.01.
+            hotstart (list[scalar]): Initial solutions/models to warm-start the optimization.
+            norm (bool): Whether to normalize objective vectors before comparison. Default is True.
+
+        Raises:
+            ValueError: If the provided `weightedScalar` or `singleScalar` does not implement the 
+                expected scalarization interfaces.
+        """
         self.__solutionsList = scalar_interface
         self.__solutionsList = w_interface
         if (not isinstance(weightedScalar, scalar_interface) or
@@ -329,33 +481,88 @@ class monise():
         self.__solutionsList = []
         self.__candidatesList = []
 
-    def __del__(self):
+    def __del__(self) -> None:
+        """
+        Deletes the solutions list attribute from the object if it exists.
+        
+        This is a cleanup method called when the object is about to be destroyed.
+        """
         if hasattr(self, '__solutionsList'):
             del self.__solutionsList
 
     @property
-    def targetSize(self): return self.__targetSize
+    def targetSize(self) -> int:
+        """Target number of Pareto-optimal solutions.
+
+        Returns:
+            int: The number of solutions to aim for in the optimization process.
+        """
+        return self.__targetSize
 
     @property
-    def targetGap(self): return self.__targetGap
+    def targetGap(self) -> float:
+        """Target minimum relative gap between solutions.
+
+        Returns:
+            float: The convergence threshold used to stop refinement.
+        """
+        return self.__targetGap
 
     @property
-    def solutionsList(self): return self.__solutionsList
+    def solutionsList(self) -> list[scalar]:
+        """List of current Pareto-optimal solutions.
+
+        Returns:
+            list[scalar]: An array containing objective values of the solutions.
+        """
+        return self.__solutionsList
 
     @property
-    def hotstart(self): return self.__hotstart+self.solutionsList
+    def hotstart(self) -> list[scalar]: 
+        """Get the list of initial solutions (hotstart) for the optimization process.
+
+        Returns:
+            list[scalar]: Combined list of warm-start solutions and previously found solutions.
+        """
+        return self.__hotstart+self.solutionsList
 
     @property
-    def currImp(self):
+    def currImp(self) -> float:
+        """Current importance score based on recent iterations.
+
+        Returns:
+            float: Maximum importance value from the last `smooth_count` iterations.
+        """
         return max(self.__importances[-self.__smoothCount:])
 
     @property
-    def maxImp(self): return self.__maxImp
+    def maxImp(self) -> float:
+        """Maximum importance value observed so far.
+
+        Returns:
+            float: The highest importance score recorded during optimization.
+        """
+        return self.__maxImp
 
     @property
-    def importances(self): return self.__importances
+    def importances(self) -> list[float]:
+        """List of all importance values computed during optimization.
 
-    def inicialization(self):
+        Returns:
+            list[float]: Historical record of importance scores.
+        """
+        return self.__importances
+
+    def inicialization(self) -> weight_solv:
+        """Initializes the optimization process.
+
+        Finds the individual minima of each objective, computes the global lower 
+        and upper bounds, and builds the first weighted solution. This sets up 
+        the optimization for iterative refinement.
+
+        Returns:
+            weight_solv: The first weighted solution used to start the optimization.
+        """
         self.__M = self.__singleScalar.M
         parents = []
         for i in range(self.__M):
@@ -381,13 +588,24 @@ class monise():
 
         return first_wsol
 
-    def update(self, node, solution):
+    def update(self, node: weight_solv, solution: scalar) -> None:
+        """Updates the internal solution set with a new candidate.
+
+        Args:
+            node (weight_solv): The node that generated the solution.
+            solution (scalar): New solution to be added.
+        """
         self.solutionsList.append(solution)
         gap = self.currImp/self.__maxImp
         logger.debug(str(len(self.solutionsList))+'th solution' +
                      ' - importance: ' + str(gap))
 
-    def _next(self):
+    def _next(self) -> weight_solv:
+        """Computes the next weighted solution.
+
+        Returns:
+            weight_solv: The next weighted solution to be optimized.
+        """
         next_wsol = weight_solv(self.solutionsList, self.__globalL,
                                 self.__globalU, self.__weightedScalar,
                                 goal=self.currImp * self.__redFact,
@@ -396,12 +614,22 @@ class monise():
         self.__importances += [next_wsol.importance]
         return next_wsol
 
-    def optimize(self):
+    def optimize(self) -> None:
+        """Runs the full MONISE optimization process.
+
+        Initializes the algorithm, iteratively refines the solution set using
+        weighted scalarization, selecting new weight vectors, solving the 
+        scalarized problem, and updates the list of solutions until the stopping
+        criteria are met.
+        """
         start = time.perf_counter()
         next_wsol = self.inicialization()
         while (self.currImp / self.__maxImp > self.__targetGap and
                len(self.solutionsList) < self.__targetSize):
             solution = next_wsol.optimize(hotstart=self.hotstart)
+            if next_wsol.best_solution_reached:
+                logger.info("Best solution found.")
+                break
             self.update(next_wsol, solution)
             next_wsol = self._next()
 

@@ -1,6 +1,5 @@
 """
-Machine Learning Multi-Objective Optimization (ml-moo) library
-Multi-Objective Optimization for Machine Learning (moopt-learn)
+Machine Learning Multi-Objective Optimization (MachineMOO) library
 """
 
 #__author__ = ''

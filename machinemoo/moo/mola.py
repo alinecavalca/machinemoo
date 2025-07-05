@@ -1,10 +1,10 @@
 import copy
 import time
-import logging
-from typing import List, Optional, Union, Any
+from typing import Any
 #from __future__ import annotations
 
 import numpy as np
+import numpy.typing as npt
 import matplotlib.pyplot as plt
 
 import pyomo.environ as pyo
@@ -14,38 +14,57 @@ from pymoo.indicators.hv import HV
 
 from machinemoo.utils.logging_config import logger
 from machinemoo import scalar_interface, w_interface, single_interface
-
-import torch
-from sklearn.linear_model import LogisticRegression
+from machinemoo.utils.typing import scalar
 
 __all__ = [
     "Mola"
 ]
 
-np.random.seed(42) # TODO: Remove
+# For reproducibility, uncomment the line below to fix the NumPy random seed in this file.
+np.random.seed(42) # TODO: Comment after dissertation
 
 EPS = 1e-10
 
 class WeightSolver:
+    """Solves a scalarization weight optimization problem for multi-objective learning.
+
+    WeightSolver finds a weight vector that maximizes a separation margin between
+    the upper and lower approximations of the Pareto front, using a MILP solver
+    (e.g., Gurobi). The computed weights are then used to guide optimization
+    in the multi-objective learning algorithm (MOLA).
+    """
     def __init__(
         self,
-        solutions: List[single_interface],
-        global_lower: np.ndarray,
-        global_upper: np.ndarray,
-        scalarizer: w_interface,
+        solutions: list[scalar],
+        global_lower: npt.NDArray[np.float64],
+        global_upper: npt.NDArray[np.float64],
+        scalarizer: scalar,
         goal: float = float("inf"),
-        time_limit: int = 10,
+        time_limit: float = 10.0,
         mip_gap: float = 0.01,
         norm: bool = False,
         epsilon: float = 0.05
     ) -> None:
-        self._scalarizer = scalarizer
-        self._num_objectives = solutions[0].M
-        self._global_lower = global_lower
-        self._solutions = solutions
-        self._time_limit = time_limit
-        self._mip_gap = mip_gap
-        self._epsilon = epsilon
+        """Initializes the WeightSolver.
+
+        Args:
+            solutions (list[scalar]): Array of candidate solutions with objective vectors.
+            global_lower (np.ndarray): Global lower bounds of the objectives.
+            global_upper (np.ndarray): Global upper bounds of the objectives.
+            scalarizer (scalar): Scalarization function used for optimization.
+            goal (float): Target importance value to reach (unused in logic). Default is infinity.
+            time_limit (float): Time limit (in seconds) for solving the MILP problem. Default is 10.0.
+            mip_gap (float): Acceptable optimality gap for MILP solver. Default is 0.01.
+            norm (bool): Whether to normalize objective vectors (unused here). Default is False.
+            epsilon (float): Tolerance for minimum improvement in dominance conditions. Default is 0.05.
+        """
+        self._scalarizer: scalar = scalarizer
+        self._num_objectives: int = solutions[0].M
+        self._global_lower: npt.NDArray[np.float64] = global_lower
+        self._solutions: list[scalar] = solutions
+        self._time_limit: float = time_limit
+        self._mip_gap: float =  mip_gap
+        self._epsilon: float = epsilon
 
         self.ml_model = None
         self.best_solution_reached = False
@@ -53,28 +72,64 @@ class WeightSolver:
 
     @property
     def M(self) -> int:
+        """Number of objective functions.
+
+        Returns:
+            int: The number of objectives.
+        """
         return self._num_objectives
 
     @property
     def importance(self) -> float:
+        """Importance score computed from the separation margin optimization.
+
+        Returns:
+            float: The separation margin between upper and lower bounds.
+        """
         return self._importance
 
     @property
-    def parents(self) -> List[single_interface]:
+    def parents(self) -> list[scalar]:
+        """Candidate solutions used to compute the weights.
+
+        Returns:
+            list[scalar]: Array of solution objects used as input.
+        """
         return self._solutions
 
     @property
-    def solution(self) -> single_interface:
+    def solution(self) -> scalar:
+        """The current optimized solution.
+
+        Returns:
+            scalar: The best solution found using the computed weights.
+        """
         return self._solution
 
     @property
-    def weights(self) -> np.ndarray:
+    def weights(self) -> npt.NDArray[np.float64]:
+        """The weight vector obtained from the MILP optimization.
+
+        Returns:
+            np.ndarray: The vector of weights for scalarization.
+        """
         return self._weights
 
     def get_model(self) -> Any:
+        """Returns the underlying machine learning model of the best solution.
+
+        Returns:
+            Any: Trained ML model corresponding to the best solution.
+        """
         return self.ml_model
 
     def _compute_weights(self) -> None:
+        """Solves the MILP to compute an optimal weight vector for scalarization.
+
+        The optimization maximizes the difference between a weighted upper bound
+        and a weighted lower bound over a set of non-dominated solutions. 
+        The result is used to guide subsequent solution refinement.
+        """
         model = pyo.ConcreteModel()
         objs_list = [s.objs for s in self._solutions]
         num_objs = self._num_objectives
@@ -127,18 +182,17 @@ class WeightSolver:
         logger.debug(f"Importance: {self._importance}")
         logger.debug(f"Global lower bound (y*): {y_star}")
 
-    def optimize(self):
-        """
-        Optimizes the solution using the best solution as a warm start.
+    def optimize(self) -> scalar:
+        """Optimizes the current solution using the computed weights (as warm start).
 
-        Iterates through the list of solutions to find the best solution based on the weighted objective function.
-        Then, it optimizes the best solution using the provided weights and updates the internal solution.
+        Selects the best solution from the parent set based on the weighted 
+        objective value. Then optimizes it with the current weight vector. 
+        Stores the resulting model and solution.
 
         Returns:
-             The optimized solution.
+            np.ndarray: The optimized solution object.
         """
-        #usar isso no random
-        best_solution = None
+        best_solution = np.zeros(self._num_objectives)
         best_objective = np.inf
 
         for solution in self._solutions:
@@ -147,7 +201,7 @@ class WeightSolver:
                 best_objective = aux
                 best_solution = solution
 
-        self._solution = copy.deepcopy(best_solution)
+        self._solution = copy.copy(best_solution)
         self._solution.optimize(self.weights)
         #self._solution = copy.copy(self._scalarizer)
         #self._solution.optimize(self.weights)
@@ -166,75 +220,149 @@ class WeightSolver:
     #    return self._solution
 
 class Mola:
+    """MOLA: Multi-Objective Learning Algorithm
+    
+    """
     def __init__(
         self,
-        weighted_scalar: Union[scalar_interface, w_interface],
-        single_scalar: Union[scalar_interface, single_interface],
+        weighted_scalar: scalar,
+        single_scalar: scalar | None,
         target_gap: float = 0.0,
-        target_size: Optional[int] = None,
+        target_size: int | None = None,
         red_fact: float = float("inf"),
-        smooth_count: Optional[int] = None,
+        smooth_count: int = 0,
         node_time_limit: float = float("inf"),
         node_gap: float = 0.01,
         norm: bool = True
     ) -> None:
+        """Initializes MOLA.
+
+        Args:
+            weighted_scalar (scalar): Scalarization object used for weighted-sum optimization.
+            single_scalar (scalar | None): Scalarization object used for single-objective optimization.
+                If None, only the weighted scalar will be used.
+            target_gap (float): Minimum relative gap between solutions to stop refinement.
+                Default is 0.0.
+            target_size (int | None): Target number of Pareto-optimal solutions to obtain.
+                Defaults to 20 × number of objectives if not specified.
+            red_fact (float): Reduction factor used in adaptive refinement. Default is infinity.
+            smooth_count (int): Number of smoothing iterations before stopping. Default is 0.
+            node_time_limit (float): Maximum time allowed (in seconds) per node optimization.
+                Default is infinity.
+            node_gap (float): Acceptable optimization gap for each node. Default is 0.01.
+            norm (bool): Whether to normalize objective vectors before comparison. Default is True.
+        """
         if (not isinstance(weighted_scalar, (scalar_interface, w_interface)) or
             not isinstance(single_scalar, (scalar_interface, w_interface))):
             raise ValueError("weighted_scalar and single_scalar must implement the correct interfaces.")
 
-        self._weighted_scalar = weighted_scalar
-        self._single_scalar = single_scalar
+        self._weighted_scalar: scalar = weighted_scalar
+        self._single_scalar: scalar = single_scalar
         self._target_gap = target_gap
         self._node_time_limit = node_time_limit
         self._node_gap = node_gap
         self._red_fact = red_fact
-        self._norm = norm
+        self._norm: bool = norm
         self._max_imp = 1.0
         self._solutions_list = []
         self._ml_models = []
         self.hypervolume_values = []
         self.history_list = []
         self._target_size = target_size or 20 * self._weighted_scalar.M
-        self._smooth_count = smooth_count if smooth_count is not None else (1 if node_time_limit == float('inf') else 5)
+        self._smooth_count = smooth_count if smooth_count != 0 else (1 if node_time_limit == float('inf') else 5)
 
     def __del__(self) -> None:
         """
-        Deletes the _solutions list attribute from the object if it exists.
+        Deletes the solutions list attribute from the object if it exists.
+        
+        This is a cleanup method called when the object is about to be destroyed.
+        It ensures that the `_solutions_list` attribute is deleted if it was created.
         """
         if hasattr(self, '_solutions_list'):
             del self._solutions_list
 
     @property
     def target_size(self) -> int:
+        """Target number of Pareto-optimal solutions.
+
+        Returns:
+            int: The number of solutions to aim for in the optimization process.
+        """
         return self._target_size
 
     @property
     def target_gap(self) -> float:
+        """Target minimum relative gap between solutions.
+
+        Returns:
+            float: The convergence threshold used to stop refinement.
+        """
         return self._target_gap
 
     @property
-    def solutions_list(self) -> List:
+    def solutions_list(self) -> list[scalar]:
+        """List of current Pareto-optimal solutions.
+
+        Returns:
+            list[scalar]: An array containing objective values of the solutions.
+        """
         return self._solutions_list
 
     @property
     def curr_imp(self) -> float:
+        """Current importance score based on recent iterations.
+
+        Returns:
+            float: Maximum importance value from the last `smooth_count` iterations.
+        """
         return max(self._importances[-self._smooth_count:])
 
     @property
     def max_imp(self) -> float:
+        """Maximum importance value observed so far.
+
+        Returns:
+            float: The highest importance score recorded during optimization.
+        """
         return self._max_imp
 
     @property
-    def importances(self) -> List[float]:
+    def importances(self) -> list[float]:
+        """List of all importance values computed during optimization.
+
+        Returns:
+            list[float]: Historical record of importance scores.
+        """
         return self._importances
     
-    def get_models(self):
+    def get_models(self)-> list[Any]:
+        """Returns the list of trained machine learning models.
+
+        These models correspond to the solutions generated during optimization.
+
+        Returns:
+            list[Any]: A list of ML models associated with each Pareto-optimal solution.
+        """
         return self._ml_models
 
-    def get_hypervolumes(self) -> List[float]:
+    def get_hypervolumes(self) -> npt.NDArray[np.float64] | list[float]:
+        """Returns the hypervolume values computed during optimization.
+
+        Returns:
+            npt.NDArray[np.float64] | list[float]: Array of hypervolume values corresponding to each iteration or solution.
+        """
         return self.hypervolume_values
 
-    def grad_squared(self, solution, obj_index):
+    def grad_squared(self, solution: scalar, obj_index: int) -> float:
+        """Computes the squared norm of the gradient for a given objective.
+
+        Args:
+            solution (scalar): A solution object containing gradients.
+            obj_index (int): Index of the objective function to compute the gradient norm.
+
+        Returns:
+            float: Squared Euclidean norm of the gradient vector.
+        """
         gradient = solution.gradient[obj_index]
         grad_norm = np.linalg.norm(gradient)
 
@@ -242,9 +370,20 @@ class Mola:
 
         return grad_norm_squared
 
-    def _update_global_lower(self, num_objs):
+    def _update_global_lower(self, num_objs: int) -> npt.NDArray[np.float64] | list[float]:
+        """Updates the global lower bounds for each objective using Lipschitz-based estimates.
+
+        If gradients are available, estimates a tighter lower bound using a Lipschitz-based formula.
+        Otherwise, it falls back to the minimum value of each objective among the solutions.
+
+        Args:
+            num_objs (int): Number of objective functions.
+
+        Returns:
+            np.ndarray: Updated global lower bounds for each objective.
+        """
         L = 1/4 # Lipschitz constante
-        if hasattr(self._solutions_list[0].objs, "gradient"):
+        if self._solutions_list[0].gradient is not None:
             adjusted_lower = np.zeros(num_objs)
             for obj_index in range(num_objs):
                 adjusted_min = min(s.objs[obj_index] - ((1 / (2 * L)) * self.grad_squared(s, obj_index))
@@ -252,20 +391,20 @@ class Mola:
                 adjusted_lower[obj_index] = adjusted_min
             logger.info(f"[Lipschitz] Updated global lower bounds: {adjusted_lower}")
         else:
+            # Just use min of each objective
             objs = np.array([[o for o in p.objs] for p in self._solutions_list])
             adjusted_lower = objs.min(0)
         return adjusted_lower
     
-    def inicialization(self):
-        """
-        Initializes the optimization process by finding individual minima, 
-        calculating global bounds, and determining the first weighted solution.
+    def inicialization(self) -> WeightSolver:
+        """Initializes the optimization process.
 
-        Parameters:
-            None
+        Finds the individual minima of each objective, computes the global lower 
+        and upper bounds, and builds the first weighted solution. This sets up 
+        the optimization for iterative refinement.
 
         Returns:
-            The first weighted solution (first_wsol)
+            WeightSolver: The first weighted solution used to start the optimization.
         """
         self._M = self._single_scalar.M
         parents = []
@@ -298,16 +437,59 @@ class Mola:
 
         return first_w_solution
 
-    def is_dominated(self, a, b):
+    def is_dominated(self, a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> bool:
+        """Checks whether solution `a` is dominated by solution `b`.
+
+        A solution `a` is considered dominated if all its objective values
+        are greater than or equal to those of `b`.
+
+        Args:
+            a (np.ndarray): Objective values of solution `a`.
+            b (np.ndarray): Objective values of solution `b`.
+
+        Returns:
+            bool: True if `a` is dominated by `b`, False otherwise.
+        """
         return np.all(np.greater_equal(a,b))
     
-    def can_add_solution(self, new_solution, solutions):
+    def can_add_solution(
+        self, 
+        new_solution: scalar, 
+        solutions: list[scalar]
+    ) -> bool:
+        """Determines whether a new solution should be added to the Pareto set.
+
+        A solution is added only if it is not dominated by any existing solution.
+
+        Args:
+            new_solution (scalar): The candidate solution.
+            solutions (list[scalar]): Array of existing solutions.
+
+        Returns:
+            bool: True if the new solution is non-dominated and should be added.
+        """
         for solution in solutions:
             if self.is_dominated(new_solution.objs, solution.objs):
                 return False 
         return True
 
-    def remove_dominated_solutions(self, new_solution, solutions):
+    def remove_dominated_solutions(
+            self,
+            new_solution: scalar,
+            solutions: list[scalar]
+        ) -> list[scalar]:
+        """Removes solutions that are dominated by a new one.
+
+        If the new solution is not dominated, it is added to the list, 
+        and any existing solutions that it dominates are removed.
+
+        Args:
+            new_solution (scalar): The candidate solution to be evaluated.
+            solutions (list[scalar]): Existing list of Pareto solutions.
+
+        Returns:
+            list[scalar]: Updated list of non-dominated solutions.
+        """
         non_dominant_solutions = []
 
         if self.can_add_solution(new_solution, solutions):
@@ -325,7 +507,15 @@ class Mola:
 
         return non_dominant_solutions
 
-    def update(self, solution) -> None:
+    def update(self, solution: scalar) -> None:
+        """Updates the internal solution set with a new candidate.
+
+        Adds the solution to the history, updates the non-dominated 
+        set, and recomputes global bounds.
+
+        Args:
+            solution (scalar): New solution to be added.
+        """
         self.history_list.append(solution)
         if self._solutions_list:
             self._solutions_list = self.remove_dominated_solutions(solution, self._solutions_list)
@@ -339,7 +529,12 @@ class Mola:
         #self._global_lower = objs.min(0)
         self._global_upper = objs.max(axis=0)
 
-    def _next(self):
+    def _next(self) -> WeightSolver:
+        """Computes the next weighted solution.
+
+        Returns:
+            WeightSolver: The next weighted solution to be optimized.
+        """
         next_w_solution = WeightSolver(
             self._solutions_list,
             self._global_lower,
@@ -354,6 +549,10 @@ class Mola:
         return next_w_solution
 
     def plot_mu(self) -> None:
+        """Plots the evolution of the margin (mu) over optimization iterations.
+
+        Useful for analyzing the convergence behavior of the algorithm.
+        """
         plt.plot(self._importances, color="purple", linewidth=2)
         plt.xlabel("Iterations")
         plt.ylabel("mu")
@@ -362,6 +561,12 @@ class Mola:
         plt.show()
 
     def optimize(self) -> None:
+        """Runs the full MOLA optimization process.
+
+        Initializes the algorithm, iteratively refines the solution set using
+        weighted scalarization, tracks hypervolume improvement, and updates
+        the non-dominated front until convergence or target is met.
+        """
         start = time.perf_counter()
         next_w_solution = self.inicialization()
 
@@ -374,19 +579,18 @@ class Mola:
         while (#self.curr_imp / self._max_imp > self._target_gap and
                len(self.solutions_list) < self._target_size
                or len(self.history_list) < self._target_size
+               #or count <= self._target_size
                ):
 
             logger.debug(f"Iteration {count+1}")
-            logger.debug(f"Solutions list: {[s.objs for s in self.solutions_list]}")
-            if count == 150:
-                break
+            logger.debug(f"Solutions list: {[s.objs for s in self.solutions_list]}")       
             count += 1
-
+            if count >= self._target_size:
+                break
             solution = next_w_solution.optimize()
             solution_set.append(solution.objs)
             self.hypervolume_values.append(hv(np.array(solution_set)))
 
-            ml_model = next_w_solution.get_model()
             self._ml_models.append(solution.x)
 
             if next_w_solution.best_solution_reached:

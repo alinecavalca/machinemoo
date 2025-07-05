@@ -1,11 +1,11 @@
 import numpy as np
+import numpy.typing as npt
 from pymoo.indicators.hv import HV
-from typing import List, Optional
 
 def compute_hypervolume_progress(
-    solutions: List[np.ndarray],
-    reference_point: Optional[np.ndarray] = None
-) -> List[float]:
+    solutions: npt.NDArray[np.float64],
+    reference_point: npt.NDArray[np.float64] = np.array([])
+) -> list[float]:
     """
     Calculates the cumulative hypervolume values over the list of solutions.
 
@@ -17,7 +17,7 @@ def compute_hypervolume_progress(
     Returns:
         A list of hypervolume values computed incrementally.
     """
-    if reference_point is None:
+    if len(reference_point) == 0:
         reference_point = np.ones_like(solutions[0])
     
     hv_indicator = HV(ref_point=reference_point)

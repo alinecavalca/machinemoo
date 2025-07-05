@@ -9,6 +9,9 @@ Author: Marcos M. Raimundo <marcosmrai@gmail.com>
 # License: BSD 3 clause
 
 from abc import ABCMeta, abstractmethod
+from typing import Any, Self
+import numpy as np
+import numpy.typing as npt
 
 __all__ = [
     "scalar_interface",
@@ -17,10 +20,11 @@ __all__ = [
 ]
 
 class scalar_interface(metaclass=ABCMeta):
+    """Abstract base interface for scalarization methods in multi-objective optimization."""
     # - propertys
     @property
     @abstractmethod
-    def M(self):
+    def M(self) -> int:
         """
         Abstract property to get the number of objectives (M) in the problem.
         
@@ -31,130 +35,133 @@ class scalar_interface(metaclass=ABCMeta):
 
     @property
     @abstractmethod
-    def feasible(self):
+    def feasible(self) -> bool:
         """
-        Abstract property to get the feasible region of the problem.
+        Abstract property to idicates whether the current solution is feasible.
         
         Returns:
-            A representation of the feasible region.
+            bool: True if the current solution is feasible.
         """
         pass
 
     @property
     @abstractmethod
-    def optimum(self):
+    def optimum(self) -> bool:
         """
-        Abstract property to get the optimum solution of the problem.
+        Abstract property to indicates whether the optimal solution has been reached.
         
         Returns:
-            The optimum solution of the problem.
+            bool: True if the optimum has been reached.
         """
         pass
 
     @property
     @abstractmethod
-    def objs(self):
+    def objs(self) -> npt.NDArray[np.float64]:
         """
         Abstract property to get the objectives of the problem.
         
         Returns:
-            list: A list of objectives in the problem.
+            np.ndarray: Objective values for each objective function.
         """
         pass
 
     @property
     @abstractmethod
-    def x(self):
+    def x(self) -> Any:
         """
         Abstract property to get the decision variables of the problem.
         
         Returns:
-            The decision variables of the problem.
+            Any: The decision variables of the problem.
         """
         pass
 
     @abstractmethod
-    def optimize(self, *args):
+    def optimize(self, *args: Any) -> Self:
         """
-        Abstract method to perform optimization on the problem.
+        Abstract method to executes the scalarization optimization procedure.
 
         Parameters:
-            *args: Variable number of arguments to be used in the optimization process.
+            *args: Arguments needed to be used in the optimization process.
 
         Returns:
-            The result of the optimization process.
+            Self: The instance after optimization.
         """
         pass
 
 
 class w_interface(metaclass=ABCMeta):
+    """Abstract interface for scalarizations using weight vectors."""
     # - propertys
     @property
     @abstractmethod
-    def w(self):
+    def w(self) -> int | npt.NDArray[np.float64]:
         """
         Abstract property to get the weights of the problem.
         
         Returns:
-            The weights of the problem.
+            int or np.ndarray: Scalarization weights (index or vector).
         """
         pass
 
 
 class single_interface(metaclass=ABCMeta):
+    """Abstract interface for single-objective optimization methods."""
     # - propertys
     @property
     @abstractmethod
-    def w(self):
+    def w(self) -> int | npt.NDArray[np.float64]: 
         """
         Abstract property to get the weights of the problem.
         
         Returns:
-            The weights of the problem.
+            int or np.ndarray: Scalarization weights (index or vector).
         """
         pass
 
-    def objetive(self):
+    def objetive(self) -> npt.NDArray[np.float64]:
         """
-        Abstract method to define the objective to optimize.
+        Abstract method to define the objective to be optimized.
         
         Returns:
-            The objective to optimize.
+            np.ndarray: The computed objective values.
         """
         pass
 
 
 class box_interface(metaclass=ABCMeta):
+    """Abstract interface for box-constrained problems."""
     ## - propertys
     @property
     @abstractmethod
-    def u(self):
+    def u(self) -> Any:
         """
         Abstract property to get the upper bound of the problem.
         
         Returns:
-            The upper bound of the problem.
+            Any: Upper bound.
         """
         pass
 
     @property
     @abstractmethod
-    def l(self):
+    def l(self) -> Any:
         """
         Abstract property to get the lower bound of the problem.
         
         Returns:
-            The lower bound of the problem.
+            Any: Lower bound.
         """
         pass
 
     @property
     @abstractmethod
-    def c(self):
+    def c(self) -> Any:
         """
         Abstract property to get the constraints of the problem.
         
         Returns:
-            The constraints of the problem.
+            Any: The constraints of the problem.
         """
         pass

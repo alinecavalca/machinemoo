@@ -1,3 +1,13 @@
+"""
+logging_config.py
+
+Configures a centralized logger for the machinemoo project.
+
+- Sets up a logger named "machinemoo" with DEBUG level.
+- Adds a StreamHandler with a custom formatter for timestamped logs.
+- Suppresses verbose logging from external libraries such as sklearn, pyomo, and gurobipy by setting their log levels to WARNING.
+"""
+
 import logging
 
 LOG_NAME = "machinemoo"

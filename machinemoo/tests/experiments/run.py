@@ -1,13 +1,12 @@
+from typing import Any, Dict, List, Tuple
+
 import numpy as np
-from typing import Dict, Any, List, Tuple
-from machinemoo import moo
-from machinemoo import MooScalarization
-from machinemoo import get_objectives
+
+from machinemoo import MooScalarization, get_objectives, moo
 from machinemoo.analysis.metrics import compute_hypervolume_progress
 
-__all__ = [
-    "run_experiments"
-]
+__all__ = ["run_experiments"]
+
 
 def run_experiments(
     methods: List[str],
@@ -17,7 +16,7 @@ def run_experiments(
     num_objs: int = 2,
     moo_instance: moo = None,
     store_models: bool = True,
-    mola_hv: bool = True
+    mola_hv: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Run multiple MOO methods and collect results for analysis.
@@ -28,8 +27,8 @@ def run_experiments(
         Names of optimization methods to run.
     opt_params : dict
         Parameters to pass to each optimization method.
-    moo_instance : MLMoo
-        Initialized MLMoo object with scalarizations set.
+    moo_instance : MachineMoo
+        Initialized MachineMoo object with scalarizations set.
     store_models : bool
         Whether to store the models trained during optimization.
 
@@ -61,10 +60,14 @@ def run_experiments(
             results[method] = {
                 "solver": solver,
                 "objectives": objectives_solutions,
-                "models": solver.get_models() if store_models and hasattr(solver, "get_models") else None,
-                "hypervolume": hypervolume_values
+                "models": (
+                    solver.get_models()
+                    if store_models and hasattr(solver, "get_models")
+                    else None
+                ),
+                "hypervolume": hypervolume_values,
             }
-            
+
             moo_instance = aux
 
         except Exception as e:
@@ -75,8 +78,9 @@ def run_experiments(
 
     return results, pareto_dict, hv_dict
 
+
 def extract_pareto_and_hv_dicts(
-    experiment_results: Dict[str, Dict[str, Any]]
+    experiment_results: Dict[str, Dict[str, Any]],
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, List[float]]]:
     """
     Extract dictionaries for Pareto front objectives and hypervolume values
@@ -89,7 +93,7 @@ def extract_pareto_and_hv_dicts(
 
     Returns:
         A tuple containing:
-        - pareto_dict: method -> np.ndarray of objective values
+        - pareto_dict: method -> npt.NDArray[np.float64] of objective values
         - hypervolumes_dict: method -> list of hypervolume values
     """
     pareto_dict = {

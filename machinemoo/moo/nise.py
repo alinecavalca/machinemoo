@@ -19,22 +19,42 @@ import time
 import bisect
 import logging
 import numpy as np
-
+import numpy.typing as npt
 import warnings
 
+from machinemoo.utils.typing import scalar
+from machinemoo.utils.logging_config import logger
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
-# from ml_moo.moo.w_node import wNode
 
 __all__ = [
     "nise"
 ]
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
-
 class wNode():
-    def __init__(self, parents, globalL, globalU, weightedScalar,
-                 distance='l2', norm=True):
+    """Solves a scalarization weight optimization problem for multi-objective learning.
+
+    Node used in the NISE algorithm to represent a candidate region
+    for multi-objective optimization via weighted scalarization.
+    """
+    def __init__(
+        self,
+        parents: list[scalar],
+        globalL: npt.NDArray[np.float64],
+        globalU: npt.NDArray[np.float64],
+        weightedScalar: scalar,
+        distance: str = 'l2',
+        norm: bool = True
+    ) -> None:
+        """Initializes the wNode.
+
+        Args:
+            parents (list[scalar]): Parent solutions used to derive this node.
+            globalL (np.ndarray): Global lower bounds of the objectives.
+            globalU (np.ndarray): Global upper bounds of the objectives.
+            weightedScalar (scalar): Scalarization function used for optimization.
+            norm (bool): Whether to normalize objective vectors (unused here). Default is False.
+            distance (str): Distance metric to compute node importance. Default is 'l2'.
+        """
         self.__distance = distance
         self.__weightedScalar = weightedScalar
         self.__M = weightedScalar.M
@@ -45,47 +65,65 @@ class wNode():
         self.__calcImportance()
 
     @property
-    def importance(self):
-        """
-        Numerical value for how importante is this weighting vector
-        for the next iteration.
+    def importance(self) -> float:
+        """Importance score of this weight vector for next iteration.
+
+        Returns:
+            float: The separation margin between upper and lower bounds.
         """
         return self.__importance
 
     @property
-    def parents(self):
+    def parents(self) -> list[scalar]:
+        """List of parent solutions used to generate this node.
+
+        Returns:
+            list[scalar]: Array of solution objects used as input.
+        """
         return self.__parents
 
     @property
-    def solution(self):
+    def solution(self) -> scalar:
+        """Returns the scalarized solution for this node.
+
+        Returns:
+            scalar: The best solution found using the computed weights.
+        """
         return self.__solution
 
     @property
-    def w(self):
-        """
-        Weighting vector, which ponderates the objectives of the
-        weighted sum method.
+    def w(self) -> npt.NDArray[np.float64]:
+        """ Weighting vector, which ponderates the objectives of the
+        weighted sum method in the scalarization method.
+
+        Returns:
+            np.ndarray: The vector of weights for scalarization.
         """
         return self.__w
 
-    def __normf(self, obj):
-        """
-        Normalize the objectives
+    def __normf(self, obj: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Normalize the objectives
+
+        Args:
+            objs (np.ndarray): Objective vector to be normalized
+        
+        Returns:
+            np.ndarray: Normalized objective vector
         """
         if self.__norm:
             return (obj-self.__globalL)/(self.__globalU-self.__globalL)
         else:
             return (obj-self.__globalL)
 
-    def __normw(self, w):
-        """
-        Normalize the weights
+    def __normw(self, w: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Normalize the weights
 
-        Parameters
-        ----------
+        Args:
+            w (np.ndarray): Weighting vector, ponderates the objectives of the
+                            weighted sum method.
 
-        w : array_like, shape = [M,]
-            Weighting vector -- ponderates the objectives of the weighted sum method.
+        Returns:
+            np.ndarray: Normalized weighting vector if normalization is True
         """
         if self.__norm:
             w_ = w*(self.__globalU-self.__globalL)
@@ -94,7 +132,12 @@ class wNode():
             return w
 
     @property
-    def useful(self):
+    def useful(self) -> bool:
+        """Check if the current solution provides new information between parents.
+        
+        Returns:
+            bool: True if current solution provedes new information, False otherwise
+        """
         P = np.array([[i for i in p.objs] for p in self.parents])
         between = ((self.__solution.objs >= P.min(axis=0)).all()
                    and (self.__solution.objs <= P.max(axis=0)).any())
@@ -102,13 +145,14 @@ class wNode():
                  (self.__solution.objs == P[1, :]).all())
         return between and not equal
 
-    def optimize(self, hotstart=None):
-        """
-        Calculates the a multiobjective scalarization
+    def optimize(self, hotstart: list[scalar] = []) -> scalar:
+        """Optimize using the weighted scalar method.
 
-        Parameters
-        ----------
-            hotstart : ?
+        Args:
+            hotstart (list[scalar]): Initial solution.
+
+        Returns:
+            scalar: Optimized solution for this weight vector.
         """
         self.__solution = copy.copy(self.__weightedScalar)
         
@@ -116,10 +160,8 @@ class wNode():
             
         return self.__solution
 
-    def __calcImportance(self):
-        """
-        Calculates the importance of a weight
-        """
+    def __calcImportance(self) -> None:
+        """Calculate the importance of the node based on the objective geometry."""
         if self.__w is None:
             self.__importance = 0
         else:
@@ -134,10 +176,8 @@ class wNode():
             else:
                 self.__importance = self.__normw(self.w)@(r-p)
 
-    def __calcW(self):
-        """
-        Calculates the weighting vector
-        """
+    def __calcW(self) -> None:
+        """Solve linear system to compute new weighting vector."""
         objs = [i.objs for i in self.__parents]
         print(objs)
         X = [[i for i in self.__normf(p.objs)]+[-1] for p in self.__parents]
@@ -157,28 +197,36 @@ class wNode():
             self.__w = None
 
 class nise():
-    def __init__(self, weightedScalar=None, singleScalar=None,
-                 targetGap=0.0, targetSize=None, hotstart=[], norm=True, 
-                 timeLimit=float('inf'), objective='l2'):
-        """
-        Noninferior Set Estimation (NISE), multi-objective
-        optimization method based on weighted sum
+    """
+    Non-inferior Set Estimation (NISE) algorithm for multi-objective optimization.
 
-        Parameters
-        ----------
-        weightedScalar : w_interface class
-            Class capable of solving the weighted sum method of the problem.
-        singleScalar : s_interface class
-            Class capable of solving the the problem for a single objective.
-        targetGap :
-        targetSize : int
-            Number of points of the representation (Number of solutions).
-        hotstart :
-        norm : bolean
-            Parameter to indicate if the optimization is normalized by the extreme
-            points (utopia and (pseudo-)nadir) or not.
-        timeLimit :
-        objective :
+    This algorithm is based on weighted sum and iteratively explores the Pareto
+    frontier by solving a sequence of weighted scalarization problems using the
+    wNode structure.
+    """
+    def __init__(
+        self,
+        weightedScalar: scalar,
+        singleScalar: scalar | None= None,
+        targetGap: float = 0.0,
+        targetSize: int | None = None, 
+        hotstart: list[scalar] = [],
+        norm: bool = True, 
+        timeLimit: float = float('inf'),
+        objective: str = 'l2'
+    ) -> None:
+        """Initializes NISE class
+
+        Args:
+            weightedScalar (scalar): An instance of a class solving weighted sum scalarizations.
+            singleScalar (scalar | None): An instance of a class solving single-objective problems.
+            targetGap (float): Termination criterion based on importance ratio. Default is 0.0.
+            targetSize (int): Desired number of Pareto solutions.
+                Defaults to 20 × number of objectives if not specified.
+            hotstart (list[scalar]): Initial solutions/models to warm-start the optimization.
+            norm (bool): Whether to normalize objectives and weights. Default is True.
+            timeLimit (float): Maximum execution time. Default is infinity.
+            objective (str): Distance metric to compute node importance. Default is 'l2'.
         """
         #self.__solutionsList = scalar_interface
         #self.__solutionsList = w_interface
@@ -204,38 +252,73 @@ class nise():
         self.__timeLimit = timeLimit
         self.__objective = objective
 
-    def __del__(self):
-        """
-        Delete solutions (scalar_interface classes) list
-        that represent the Pareto-frontier.
+    def __del__(self) -> None:
+        """Deletes the solutions list attribute from the object if it exists.
+        
+        This is a cleanup method called when the object is about to be destroyed.
         """
         if hasattr(self, '__solutionsList'):
             del self.__solutionsList
 
     @property
-    def targetSize(self): return self.__targetSize
+    def targetSize(self) -> int: 
+        """Target number of Pareto-optimal solutions.
 
-    @property
-    def targetGap(self): return self.__targetGap
-
-    @property
-    def maxImp(self): return self.__maxImp
-
-    @property
-    def currImp(self): return self.__currImp
-
-    @property
-    def solutionsList(self): return self.__solutionsList
-
-    @property
-    def hotstart(self): return self.__hotstart+self.solutionsList
-
-    def inicialization(self):
+        Returns:
+            int: The number of solutions to aim for in the optimization process.
         """
-        Inicializate the objects of the scalarizations.
-        Compute the solutions from the individual minima.
-        Compute the global inferior bound and the global superior bound.
-        Create the first region.
+        return self.__targetSize
+
+    @property
+    def targetGap(self) -> float:
+        """Target minimum relative gap between solutions.
+
+        Returns:
+            float: The convergence threshold used to stop refinement.
+        """
+        return self.__targetGap
+
+    @property
+    def maxImp(self) -> float:
+        """Maximum importance value observed so far.
+
+        Returns:
+            float: The highest importance score recorded during optimization.
+        """
+        return self.__maxImp
+
+    @property
+    def currImp(self) ->  float:
+        """Current importance score based on recent iterations.
+
+        Returns:
+            float: Maximum importance value from the last `smooth_count` iterations.
+        """
+        return self.__currImp
+
+    @property
+    def solutionsList(self) -> list[scalar]:
+        """List of current Pareto-optimal solutions.
+
+        Returns:
+            list[scalar]: An array containing objective values of the solutions.
+        """
+        return self.__solutionsList
+
+    @property
+    def hotstart(self) -> list[scalar]:
+        """Get the list of initial solutions (hotstart) for the optimization process.
+
+        Returns:
+            list[scalar]: Combined list of warm-start solutions and previously found solutions.
+        """
+        return self.__hotstart+self.solutionsList
+
+    def inicialization(self) -> None:
+        """Initialize scalarizations and compute extreme points (utopia/nadir).
+
+        Raises:
+            ValueError: If number of objectives is not 2.
         """
         self.__M = self.__singleScalar.M
         if self.__M != 2:
@@ -267,12 +350,11 @@ class nise():
         self.__maxImp = self.__candidatesList[-1].importance
         self.__currImp = self.__candidatesList[-1].importance
 
-    def select(self):
-        """
-        Selects candidate from candidate list,
-        which is the next regions to be optimized
+    def select(self) ->  wNode | None:
+        """Selects next candidate node to explore.
 
-        return selected candidate
+        Returns:
+            wNode or None: The most relevant unbounded candidate.
         """
         bounded_ = True
         while bounded_ and self.__candidatesList != []:
@@ -284,14 +366,14 @@ class nise():
         else:
             return candidate
 
-    def update(self, node, solution):
+    def update(self, node: wNode, solution: scalar) -> None:
         """
-        Update solutions list with a new solution
+        Update solutions list with a new solution.
+        Add a new solution to the Pareto set and explore new regions.
 
-        Parameters
-        ----------
-            node     : selected candidate
-            solution :
+        Args:
+            node (wNode): Current candidate node.
+            solution (scalar): Corresponding scalarized solution.
         """
         try:
             self.solutionsList.append(solution)
@@ -311,14 +393,13 @@ class nise():
         logger.debug(str(len(self.solutionsList))+'th solution' +
                      ' - importance: ' + str(gap))
 
-    def __branch(self, node, solution):
+    def __branch(self, node: wNode, solution: scalar) -> None:
         """
+        Generate new candidate nodes by branching from a given solution.
 
-
-        Parameters
-        ----------
-            node      : selected candidate
-            solution? :
+        Args:
+            node (wNode): Parent node.
+            solution (scalar): New solution to create branches from.
         """
         for i in range(self.__M):
             parents = [p if j != i else node.solution
@@ -338,9 +419,9 @@ class nise():
                                            boxW.importance)
                 self.__candidatesList.insert(index, boxW)
 
-    def optimize(self):
+    def optimize(self) -> None:
         """
-        Find a set of efficient solutions
+        Execute the full NISE algorithm to approximate the Pareto frontier.
         """
         start = time.perf_counter()
         self.inicialization()

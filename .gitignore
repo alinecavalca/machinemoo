@@ -1,4 +1,5 @@
 machinemoo/tests/experiments/gender_law/exp/models--*
+machinemoo/tests/experiments/gender_law/exp/.locks/models--bert-base-uncased/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
