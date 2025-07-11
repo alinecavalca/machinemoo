@@ -105,7 +105,8 @@ class NLPScalarization(Scalarization):
                     task_loss = criterion(logits_dict[task], labels)
                     losses.append(weight[i] * task_loss)
 
-                loss = sum(losses) / self.__M
+                #loss = sum(losses) / self.__M
+                loss = sum(losses)
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()

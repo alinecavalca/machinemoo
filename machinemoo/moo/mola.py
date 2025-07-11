@@ -353,7 +353,7 @@ class Mola:
         """
         return self.hypervolume_values
 
-    def grad_squared(self, solution: scalar, obj_index: int) -> float:
+    def _grad_squared(self, solution: scalar, obj_index: int) -> float:
         """Computes the squared norm of the gradient for a given objective.
 
         Args:
@@ -386,7 +386,7 @@ class Mola:
         if self._solutions_list[0].gradient is not None:
             adjusted_lower = np.zeros(num_objs)
             for obj_index in range(num_objs):
-                adjusted_min = min(s.objs[obj_index] - ((1 / (2 * L)) * self.grad_squared(s, obj_index))
+                adjusted_min = min(s.objs[obj_index] - ((1 / (2 * L)) * self._grad_squared(s, obj_index))
                           for s in self._solutions_list)
                 adjusted_lower[obj_index] = adjusted_min
             logger.info(f"[Lipschitz] Updated global lower bounds: {adjusted_lower}")
@@ -493,17 +493,17 @@ class Mola:
         non_dominant_solutions = []
 
         if self.can_add_solution(new_solution, solutions):
-            print("new solution added", new_solution.objs)
+            logger.debug(f"New solution added {new_solution.objs}")
             non_dominant_solutions.append(new_solution)
 
             for solution in solutions:
                 if not self.is_dominated(solution.objs, new_solution.objs):
                     non_dominant_solutions.append(solution)
                 else:
-                    print("solution dominated", solution.objs)
+                    logger.debug(f"Solution dominated {solution.objs}")
         else:
             non_dominant_solutions = solutions
-            print("new solution dominated", new_solution.objs)
+            logger.debug(f"New solution dominated {new_solution.objs}")
 
         return non_dominant_solutions
 

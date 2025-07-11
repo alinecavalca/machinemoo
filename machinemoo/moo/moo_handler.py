@@ -121,7 +121,7 @@ class MachineMoo:
             'monise': self.moo_monise,
             'random_weight': self.moo_random_weight,
             #'rennen': self.moo_rennen,
-            #'nise': self.moo_nise
+            'nise': self.moo_nise
         }
 
         if method not in methods:

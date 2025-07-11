@@ -12,12 +12,25 @@ from numpy.typing import ArrayLike
 
 from machinemoo import Scalarization
 from machinemoo.utils.typing import MatrixLike
+from scipy.special import expit
+
 
 seed = 42
 np.random.seed(seed)
 torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 torch.backends.cudnn.deterministic = True
+
+class TorchLogReg(nn.Module):
+    def __init__(self, w_init, b_init):
+        super().__init__()
+        self.linear = nn.Linear(in_features=w_init.shape[0], out_features=1)
+        with torch.no_grad():
+            self.linear.weight.copy_(torch.tensor(w_init).unsqueeze(0))
+            self.linear.bias.copy_(torch.tensor([b_init]))
+    
+    def forward(self, x):
+        return torch.sigmoid(self.linear(x))
 
 
 class LogRegScalarization(Scalarization):
@@ -52,6 +65,26 @@ class LogRegScalarization(Scalarization):
             warm_start=True,
             class_weight=None,
         )
+    
+    def get_gradient_nopytorch(self,
+        X: MatrixLike,
+        y: ArrayLike,
+        model: Any
+        ):
+        w = model.coef_.flatten()      # shape (n_features,)
+        b = model.intercept_.item()    # scalar
+
+        # Compute predictions (sigmoid)
+        z = X @ w + b                # shape (n_samples,)
+        p = expit(z)                 # sigmoid(z)
+
+        # Compute gradient of binary logistic loss (negative log-likelihood)
+        # Gradient w.r.t. weights
+        grad_w = X.T @ (p - y) / len(y)
+
+        # Gradient w.r.t. intercept
+        grad_b = np.mean(p - y)
+        return grad_w
 
     def get_gradient(
         self,
@@ -62,17 +95,31 @@ class LogRegScalarization(Scalarization):
         X_tensor = torch.tensor(np.asarray(X_train), dtype=torch.float32)
         y_tensor = torch.tensor(np.asarray(y_train), dtype=torch.float32).view(-1, 1)
         
-        w = torch.tensor(model.coef_, dtype=torch.float32, requires_grad=True)
-        b = torch.tensor(model.intercept_, dtype=torch.float32)
+        #w = torch.tensor(model.coef_, dtype=torch.float32, requires_grad=True)
+        #b = torch.tensor(model.intercept_, dtype=torch.float32)
 
-        logits = X_tensor @ w.T + b  # shape: (n_samples, 1)
-        preds = torch.sigmoid(logits)
+        #logits = X_tensor @ w.T + b  # shape: (n_samples, 1)
+        #preds = torch.sigmoid(logits)
 
-        loss = torch.nn.functional.binary_cross_entropy(preds, y_tensor)
+        #loss = nn.functional.binary_cross_entropy(preds, y_tensor)
 
+        w = model.coef_.flatten()       # shape: (n_features,)
+        b = model.intercept_.item()
+
+        pmodel = TorchLogReg(w, b)
+
+        # 5. Enable gradient tracking
+        for param in pmodel.parameters():
+            param.requires_grad = True
+
+        criterion = nn.BCELoss()
+        output = pmodel(X_tensor)
+        loss = criterion(output, y_tensor)
         loss.backward()
 
-        return w.grad.detach().numpy().copy()
+        grad_w = pmodel.linear.weight.grad.detach().numpy()
+        grad_b = pmodel.linear.bias.grad.item()
+        return np.concatenate([grad_w.flatten(), [grad_b]])
 
     def training(
         self,
@@ -121,17 +168,17 @@ class LogRegScalarization(Scalarization):
             #gradient = np.vstack(gradient)
             group_values = self.X[self.fair_feat].to_numpy()
 
-            grads = []
             for g in self.fair_att:
                 mask = (group_values == g)
                 Xg = self.X.to_numpy()[mask]
                 yg = self.y.to_numpy()[mask]
 
-                grad = self.get_gradient(Xg, yg, self.model)
-                grads.append(grad)
+                grads = self.get_gradient(Xg, yg, self.model).squeeze()
 
-            grads = np.vstack(grads) 
-            print(f"gradi  {grads}")
+            grads = np.vstack(grads)
+            if self.M == 3:
+                grads = np.append(grads, np.zeros(len(grads[0])))
+            print(f"gradient  {grads}")
             return self.model, objs, grads
         return self.model, objs
 

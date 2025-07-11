@@ -15,13 +15,14 @@ def plot_pareto(
     point: npt.NDArray[np.float64] | list[float] = np.array([]),
     save_path: str  = "",
     labels: tuple | list[str] = (),
-    # color       = ['#FF5C8D', '#4BD6A0', '#9D5CFF'],
-    color: list[str] = ["#d7191c", "#fdae61", "#2c7bb6"],
+    #color: list[str] | str = ['#d7191c', '#fdae61', '#2c7bb6', '#abd9e9'],
+    color: list[str] | str = ['#d73027', '#fc8d59', '#4575b4', '#fee090', '#91bfdb', '#e0f3f8'],
     point_label: str = "Baseline Model",
     title: str = "Pareto Frontier",
     fontsize: int = 20,
     figsize: tuple[int, int] = (10, 7),
     s_factor: int = 2,
+    limits: list = []
 ) -> None:
     """
     Plots the Pareto frontiers for different methods using Matplotlib.
@@ -81,14 +82,15 @@ def plot_pareto(
     labels = labels if len(labels) != 0 else default_labels
 
     if num_objectives < 4:
-        limits = []
-        for i in range(all_data.shape[1]):
-            limits.append(
-                (
-                    all_data[:, i].min() - all_data[:, i].std(),
-                    all_data[:, i].max() + all_data[:, i].std(),
+        if len(limits) == 0:
+            limits = []
+            for i in range(all_data.shape[1]):
+                limits.append(
+                    (
+                        all_data[:, i].min() - all_data[:, i].std(),
+                        all_data[:, i].max() + all_data[:, i].std(),
+                    )
                 )
-            )
 
         for idx, (key, values) in enumerate(methods.items()):
             row, col = positions[idx]
@@ -188,7 +190,7 @@ def plot_pareto(
 
             objs = methods[key]
             df = pd.DataFrame(objs, columns=labels)
-            df["Method"] = f"{key.upper()}"
+            df["Method"] = f"{key.upper()} Solutions"
 
             df.iloc[:, :-1] = (df.iloc[:, :-1] - df.iloc[:, :-1].min()) / (
                 df.iloc[:, :-1].max() - df.iloc[:, :-1].min()
@@ -199,6 +201,7 @@ def plot_pareto(
             parallel_coordinates(
                 df, class_column="Method", color=c, alpha=alpha, ax=ax, linewidth=1.5
             )
+                
             if len(point) != 0:
                 point = np.array(point).reshape(1, -1)
                 df_point = pd.DataFrame(point, columns=labels)
@@ -209,8 +212,8 @@ def plot_pareto(
                     class_column="Solution",
                     color="black",
                     # color='#FFC145',
-                    alpha=alpha,
-                    linewidth=2,
+                    alpha=1.0,
+                    linewidth=1.5 * (s_factor // 2),
                 )
             ax.set_xticklabels(df.columns[:-1], rotation=45, fontsize=fontsize)
             plt.xlabel("Objectives", fontsize=14)
@@ -220,7 +223,7 @@ def plot_pareto(
     for idx in range(num_plots, total_subplots):
         fig.add_subplot(gs[positions[idx][0], positions[idx][1]]).axis("off")
 
-    fig.suptitle(title, fontsize=fontsize + 5)
+    #fig.suptitle(title, fontsize=fontsize + 5)
     fig.tight_layout()  # rect=[0, 0.1, 1, 1])
     # fig.subplots_adjust(wspace=-.3)
     if save_path != "":
@@ -685,7 +688,8 @@ def plot_hypervolume(
 def plot_multiple_hypervolumes(
     methods_hv: dict[Any, Any],
     subplots: bool = False,
-    colors: list[str] = ["#d7191c", "#fdae61", "#2c7bb6"],
+    save_path: str = "",
+    colors: list[str] | str = ['#d73027', '#fc8d59', '#4575b4', '#fee090', '#91bfdb', '#e0f3f8'],
 ) -> None:
     """
     Plots hypervolume evolution for multiple methods, optionally in subplots.
@@ -693,6 +697,7 @@ def plot_multiple_hypervolumes(
     Args:
         methods_hv (dict): Method names mapped to hypervolume value lists.
         subplots (bool): Whether to plot in subplots.
+        save_path (str): Optional path to save the figure.
         colors (list[str]): Color list for lines.
 
     Returns:
@@ -701,6 +706,8 @@ def plot_multiple_hypervolumes(
     #if len(colors) == 0:
     #    colors = plt.cm.tab10.colors
     # method_names = list(methods_hv.keys())
+    if isinstance(colors, str):
+        colors = [colors]
 
     if subplots:
         n_methods = len(methods_hv)
@@ -757,11 +764,13 @@ def plot_multiple_hypervolumes(
 
         plt.xlabel("Iterations")
         plt.ylabel("Hypervolume")
-        plt.title("Hypervolume Evolution Across Methods")
+        #plt.title("Hypervolume Evolution Across Methods")
         plt.legend(loc="lower right")
         plt.grid(True)
         plt.tight_layout()
         plt.show()
+        if save_path != "":
+            plt.savefig(save_path)
 
 
 def plot_mu_evolution(
@@ -789,14 +798,14 @@ def plot_mu_evolution(
 
 from math import ceil
 # TODO: Only for dissertation
-def plot_pareto_2d_set_limit(
+def plot_pareto_2d_set_limit_(
     pareto_dict: dict[Any, Any],
     show_subplot: bool = True,
     title: str = "Pareto Frontier (2D)",
     x_label: str = "Objective 1",
     y_label: str = "Objective 2",
     point: npt.NDArray[np.float64] = np.array([]),
-    colors: list[str] = ["#d7191c", "#fdae61", "#2c7bb6"],
+    colors: list[str] = ['#d73027', '#fc8d59', '#4575b4', '#fee090', '#91bfdb', '#e0f3f8'],
     axis_mode: str = "global",  # "first" or "global"
 ) -> None:
     """
@@ -885,4 +894,189 @@ def plot_pareto_2d_set_limit(
 
     plt.suptitle(title)
     plt.tight_layout()
+    plt.show()
+
+
+
+def plot_pareto_set_limit(
+    methods: dict,
+    alpha: float = 1.0,
+    point: npt.NDArray[np.float64] | list[float] = np.array([]),
+    save_path: str  = "",
+    labels: tuple | list[str] = (),
+    # color       = ['#FF5C8D', '#4BD6A0', '#9D5CFF'],
+    color: list[str] | str = ['#d73027', '#fc8d59', '#4575b4', '#fee090', '#91bfdb', '#e0f3f8'],
+    point_label: str = "Baseline Model",
+    title: str = "Pareto Frontier",
+    fontsize: int = 20,
+    figsize: tuple[int, int] = (10, 7),
+    s_factor: int = 2,
+    axis_mode: str = "global",  # "first" or "global"
+) -> None:
+    num_plots: int = len(methods)
+    if isinstance(color, str):
+        color = [color]
+
+    layout_configs: dict[int, tuple[int, int]] = {
+        1: (1, 1),
+        2: (1, 2),
+        3: (1, 3),
+        4: (2, 2),
+        5: (2, 3),
+        6: (2, 3),
+        7: (3, 3),
+        8: (3, 3),
+        9: (3, 3),
+    }
+
+    nrows, ncols = layout_configs.get(
+        num_plots,
+        (
+            int(np.ceil(np.sqrt(num_plots))),
+            int(np.ceil(num_plots / np.ceil(np.sqrt(num_plots)))),
+        ),
+    )
+    fig = plt.figure(figsize=(ncols * figsize[0], nrows * figsize[1]))
+    gs = gridspec.GridSpec(nrows, ncols, figure=fig)
+
+    axes = []
+    positions = [(i, j) for i in range(nrows) for j in range(ncols)]
+
+    all_data = np.concatenate(list(methods.values()), axis=0)
+
+    num_objectives = all_data.shape[1]
+    default_labels = [f"Objective {i+1}" for i in range(num_objectives)]
+    labels = labels if len(labels) != 0 else default_labels
+
+    if num_objectives < 4:
+        limits = []
+        for i in range(all_data.shape[1]):
+            #limits.append(
+            #    (
+            #        all_data[:, i].min() - all_data[:, i].std(),
+            #        all_data[:, i].max() + all_data[:, i].std(),
+            #    )
+            #)
+            if axis_mode == "first":
+                first_objs = next(iter(methods.values()))
+                x_min, x_max = first_objs[:, 0].min() - first_objs[:, 0].std(), first_objs[:, 0].max() + first_objs[:, 0].std()
+                y_min, y_max = first_objs[:, 1].min() - first_objs[:, 1].std(), first_objs[:, 1].max() + first_objs[:, 1].std()
+                if num_objectives == 3:
+                    z_min, z_max = first_objs[:, 2].min() - first_objs[:, 2].std(), first_objs[:, 2].max() + first_objs[:, 2].std()
+            elif axis_mode == "global":
+                all_points = np.vstack(list(methods.values()))
+                x_min, x_max = all_points[:, 0].min() - all_points[:, 0].std(), all_points[:, 0].max() + all_points[:, 0].std()
+                y_min, y_max = all_points[:, 1].min() - all_points[:, 1].std(), all_points[:, 1].max() + all_points[:, 1].std()
+                if num_objectives == 3:
+                    z_min, z_max = all_points[:, 2].min() - all_points[:, 2].std(), all_points[:, 2].max() + all_points[:, 2].std()
+            else:
+                raise ValueError("axis_mode must be 'first' or 'global'")
+            limits.append((x_min, x_max))
+            limits.append((y_min, y_max))
+            if num_objectives == 3:
+                limits.append((z_min, z_max))
+        for idx, (key, values) in enumerate(methods.items()):
+            row, col = positions[idx]
+
+            ax: Any = None
+            if values.shape[1] == 3:
+                ax = fig.add_subplot(gs[row, col], projection="3d")
+            else:
+                ax = fig.add_subplot(gs[row, col])
+
+            axes.append(ax)
+
+            c = color[idx % len(color)]
+            ax.grid(True)
+            if values.shape[1] == 2:
+                ax.scatter(
+                    x=values[:, 0],
+                    y=values[:, 1],
+                    alpha=alpha,
+                    c=c,
+                    label=f"{key.upper().replace("_", " ")} Solutions",
+                    edgecolor="k",
+                    linewidth=1.5 * (s_factor // 2),
+                    s=50 * s_factor,
+                )
+            else:
+                ax.scatter(
+                    xs=values[:, 0],
+                    ys=values[:, 1],
+                    zs=values[:, 2],
+                    alpha=alpha,
+                    c=c,
+                    label=f"{key.upper().replace("_", " ")} Solutions",
+                    edgecolor="k",
+                    linewidth=1.5 * (s_factor // 2),
+                    s=50 * s_factor,
+                )
+
+                ax.set_zlabel(
+                    labels[2].replace("_", " ").capitalize(),
+                    fontsize=fontsize,
+                    labelpad=3 * (figsize[0] // 2),
+                )
+                ax.tick_params(axis="z", labelsize=fontsize - 5)
+                ax.set_zlim(limits[2])
+
+            ax.set_xlabel(
+                labels[0].replace("_", " ").capitalize(),
+                fontsize=fontsize,
+                labelpad=3 * (figsize[0] // 2),
+            )
+            ax.set_ylabel(
+                labels[1].replace("_", " ").capitalize(),
+                fontsize=fontsize,
+                labelpad=3 * (figsize[0] // 2),
+            )
+            ax.set_xlim(limits[0])
+            ax.set_ylim(limits[1])
+
+            ax.legend(fontsize=fontsize, loc="upper center")
+            ax.tick_params(axis="x", labelsize=fontsize - 5)
+            ax.tick_params(axis="y", labelsize=fontsize - 5)
+
+            if len(point) != 0:
+                if values.shape[1] == 2:
+                    ax.scatter(
+                        x=point[0],
+                        y=point[1],
+                        marker="X",
+                        c="black",
+                        # c='#FFC145',
+                        edgecolors="k",
+                        s=100 * s_factor,
+                        linewidth=1.5 * (s_factor // 2),
+                        label=point_label,
+                    )
+                else:
+                    ax.scatter(
+                        xs=point[0],
+                        ys=point[1],
+                        zs=point[2],
+                        marker="X",
+                        c="black",
+                        # c='#FFC145',
+                        edgecolors="k",
+                        s=100 * s_factor,
+                        linewidth=1.5 * (s_factor // 2),
+                        label=point_label,
+                    )
+
+                ax.legend(fontsize=fontsize - 5)
+
+    total_subplots = nrows * ncols
+    for idx in range(num_plots, total_subplots):
+        fig.add_subplot(gs[positions[idx][0], positions[idx][1]]).axis("off")
+
+    #fig.suptitle(title, fontsize=fontsize + 5)
+    fig.tight_layout()  # rect=[0, 0.1, 1, 1])
+    # fig.subplots_adjust(wspace=-.3)
+    if save_path != "":
+        plt.savefig(
+            save_path,
+            # transparent=True,
+            bbox_inches="tight",
+        )
     plt.show()
