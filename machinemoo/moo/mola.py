@@ -23,7 +23,9 @@ __all__ = [
 # For reproducibility, uncomment the line below to fix the NumPy random seed in this file.
 np.random.seed(42) # TODO: Comment after dissertation
 
-EPS = 1e-10
+EPS = 1e-8
+
+
 
 class WeightSolver:
     """Solves a scalarization weight optimization problem for multi-objective learning.
@@ -132,6 +134,7 @@ class WeightSolver:
         """
         model = pyo.ConcreteModel()
         objs_list = [s.objs for s in self._solutions]
+        objs_list_lower = [s.objs_lower for s in self._solutions]
         num_objs = self._num_objectives
 
         y_star = self._global_lower
@@ -144,21 +147,40 @@ class WeightSolver:
         model.constraints = pyo.ConstraintList()
 
         for objs in objs_list:
+            constr = sum(model.w[j] * (model.y_sup[j] - y_star[j]) for j in range(num_objs)) <= \
+                     sum(model.w[j] * max(objs[j]-y_star[j],  EPS)  for j in range(num_objs))
             model.constraints.add(
-                sum(model.w[j] * model.y_sup[j] for j in range(num_objs)) <= 
-                sum(model.w[j] * objs[j] for j in range(num_objs))
+                constr
             )
 
-        for i in range(len(objs_list)):
+        for i in range(len(objs_list_lower)):
             for j in range(num_objs):
+                # if y_und[j] is lower than objs_list_lower[i][j], model.b[i, j]=0,
+                # otherwise model.b[i, j]=1
                 model.constraints.add(
                     (model.y_und[j] - y_star[j]) >=
-                    model.b[i, j] * (objs_list[i][j] - y_star[j]) * (1 - self._epsilon)
+                    model.b[i, j] * (objs_list_lower[i][j] - y_star[j]) + EPS
                 )
-
-        for i in range(len(objs_list)):
+            # in order to y_sup dominate objs_list_lower[i],
+            # sum_j model.b[i, j] == 0
+            # thus sum_j model.b[i, j] >= 1
             model.constraints.add(
-                sum(model.b[i, j] for j in range(num_objs)) >= num_objs - 1
+                sum(model.b[i, j] for j in range(num_objs)) >= 1
+            )
+        
+        for j in range(num_objs):
+            model.constraints.add(
+                sum(model.b[i, j] for i in range(len(objs_list_lower))) >= 1
+            )
+
+        
+        for j in range(num_objs):
+            # y_sup[j] >= y_und[j]
+            model.constraints.add(
+                model.y_sup[j] >= model.y_und[j]
+            )
+            model.constraints.add(
+                model.y_und[j] >= y_star[j]
             )
 
         model.constraints.add(sum(model.w[j] for j in range(num_objs)) == 1)
@@ -176,10 +198,24 @@ class WeightSolver:
         solver.release_license()
 
         self._weights = np.array([pyo.value(model.w[i]) for i in range(num_objs)])
+        y_sup_ = np.array([pyo.value(model.y_sup[i]) for i in range(num_objs)])
+        y_und_ = np.array([pyo.value(model.y_und[i]) for i in range(num_objs)])
+
+        # Test if y_und_ dominates any of the objs_list_lower
+        for i,objs_lower in enumerate(objs_list_lower):
+            if all(y_und_<objs_lower):
+                logger.warning("y_und_ dominates an objective lower bound, which is not expected.")
+                logger.debug(f"objs_lower: {objs_lower}")
+                logger.debug(f"y_und_: {y_und_}")
+                logger.debug(" ".join([f"b[{i},{j}]={pyo.value(model.b[i, j])}" for j in range(num_objs)]))
+
         self._importance = pyo.value(model.obj.expr) if self._weights is not None else 0
 
         logger.debug(f"Calculated weights: {self._weights}")
         logger.debug(f"Importance: {self._importance}")
+        logger.debug(f"Importance: {self._weights@y_sup_ - self._weights@y_und_}")
+        logger.debug(f"y_sup: {y_sup_}")
+        logger.debug(f"y_und: {y_und_}")
         logger.debug(f"Global lower bound (y*): {y_star}")
 
     def optimize(self) -> scalar:
@@ -233,7 +269,8 @@ class Mola:
         smooth_count: int = 0,
         node_time_limit: float = float("inf"),
         node_gap: float = 0.01,
-        norm: bool = True
+        norm: bool = True,
+        utopia_slack: float | str = 1e-5
     ) -> None:
         """Initializes MOLA.
 
@@ -270,6 +307,7 @@ class Mola:
         self.history_list = []
         self._target_size = target_size or 20 * self._weighted_scalar.M
         self._smooth_count = smooth_count if smooth_count != 0 else (1 if node_time_limit == float('inf') else 5)
+        self._utopia_slack = utopia_slack
 
     def __del__(self) -> None:
         """
@@ -382,24 +420,13 @@ class Mola:
         Returns:
             np.ndarray: Updated global lower bounds for each objective.
         """
-        L = 1/4 # Lipschitz constante
-        if self._solutions_list[0].gradient is not None:
-            adjusted_lower = np.zeros(num_objs)
-            for obj_index in range(num_objs):
-                adjusted_min = min(s.objs[obj_index] - ((1 / (2 * L)) * self._grad_squared(s, obj_index))
-                          for s in self._solutions_list)
-                adjusted_lower[obj_index] = adjusted_min
-            logger.info(f"[Lipschitz] Updated global lower bounds: {adjusted_lower}")
-        else:
-            # Just use min of each objective
-            objs = np.array([[o for o in p.objs] for p in self._solutions_list])
-            adjusted_lower = objs.min(0)
-        return adjusted_lower
+        objs_lower = np.array([[o for o in p.objs_lower] for p in self._solutions_list]) 
+        return objs_lower.min(0)
     
     def inicialization(self) -> WeightSolver:
         """Initializes the optimization process.
 
-        Finds the individual minima of each objective, computes the global lower 
+        Finds the individual minima of each objective, computes the global lower bounds
         and upper bounds, and builds the first weighted solution. This sets up 
         the optimization for iterative refinement.
 
@@ -416,12 +443,10 @@ class Mola:
             self._solutions_list.append(single_scalar)
             self.history_list.append(single_scalar)
             parents.append(single_scalar)
-
+        
         objs = np.array([[o for o in p.objs] for p in parents])
         num_objs = len(objs[0])
         self._global_lower = self._update_global_lower(num_objs=num_objs)
-        #self._global_lower = objs.min(0)
-        #self._global_lower = np.zeros(shape=num_objs)
         self._global_upper = objs.max(axis=0)
 
         first_w_solution = WeightSolver(
@@ -525,8 +550,6 @@ class Mola:
         objs = np.array([[o for o in s.objs] for s in self._solutions_list])
         num_objs = len(solution.objs)
         self._global_lower = self._update_global_lower(num_objs=num_objs)
-        #self._global_lower = np.zeros(shape=num_objs)
-        #self._global_lower = objs.min(0)
         self._global_upper = objs.max(axis=0)
 
     def _next(self) -> WeightSolver:

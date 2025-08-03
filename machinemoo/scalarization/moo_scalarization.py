@@ -142,6 +142,7 @@ class Scalarization(w_interface, single_interface, scalar_interface):
         self.__M = len(self.__objs)
         self.__x = model
         return self
+    
 
 class MooScalarization(w_interface, single_interface, scalar_interface):
     """Implements scalarization for machine learning models using an external training function.
@@ -207,6 +208,15 @@ class MooScalarization(w_interface, single_interface, scalar_interface):
             np.ndarray: Objective values for each objective function.
         """
         return self.__objs
+    
+    @property
+    def objs_lower(self) -> npt.NDArray[np.float64]:
+        """Returns a lower estimative of the objective values.
+        
+        Returns:
+            np.ndarray: Lower estimative for each objective function.
+        """
+        return self.__objs_lower
 
     @property
     def x(self) -> Any:
@@ -257,5 +267,8 @@ class MooScalarization(w_interface, single_interface, scalar_interface):
 
         self.__objs, self.model, self.__gradient = self.train(self.model, self.__w)
         self.__x = self.model
+
+        objs_delta = 1/(2*self.L)*self.__w@np.array([self.__gradient[idx]@self.__gradient[idx] for idx in range(self.M)])
+        self.__objs_lower = self.__objs - objs_delta
 
         return self
