@@ -67,7 +67,7 @@ def extract_bert_embeddings(
 
     embeddings = []
     with torch.no_grad():
-        for i in tqdm(range(0, len(texts), batch_size)):
+        for i in tqdm(range(0, len(texts), batch_size), leave=False):
             batch_texts = texts[i : i + batch_size]
             encoding = tokenizer(
                 batch_texts,

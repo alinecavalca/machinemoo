@@ -1,67 +1,130 @@
-import matplotlib.gridspec as gridspec
-import matplotlib.pyplot as plt
 import pandas as pd
-import plotly.graph_objects as go
-import seaborn as sns
 import numpy as np
 import numpy.typing as npt
-from pandas.plotting import parallel_coordinates
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from pandas.plotting import parallel_coordinates
 from typing import Any
+from matplotlib.axes import Axes
+from mpl_toolkits.mplot3d import Axes3D
 
+
+# ------------------ main ------------------
 def plot_pareto(
     methods: dict,
     alpha: float = 1.0,
-    point: npt.NDArray[np.float64] | list[float] = np.array([]),
+    subset: npt.NDArray[np.float64] | list[float] = np.array([]),
     save_path: str  = "",
     labels: tuple | list[str] = (),
-    #color: list[str] | str = ['#d7191c', '#fdae61', '#2c7bb6', '#abd9e9'],
     color: list[str] | str = ['#d73027', '#fc8d59', '#4575b4', '#fee090', '#91bfdb', '#e0f3f8'],
-    point_label: str = "Baseline Model",
+    subset_label: str | list[str] = "Baseline Model",
     title: str = "Pareto Frontier",
     fontsize: int = 20,
     figsize: tuple[int, int] = (10, 7),
     s_factor: int = 2,
-    limits: list = []
+    limits: list = [],
+    subset_marker: str | list[str] = "X",
+    x_threshold: int | float | None = None,
+    y_threshold: int | float | None = None,
+    threshold_color: str = "#313695"
 ) -> None:
     """
     Plots the Pareto frontiers for different methods using Matplotlib.
 
     Displays either 2D, 3D, or parallel coordinates (>= 4D) plots depending on the
-    number of objectives. Supports highlighting a reference point and saving the figure.
+    number of objectives. Supports highlighting a reference subset and saving the figure.
 
     Args:
         methods (dict): Dictionary where keys are method names and values are objective arrays.
         alpha (float): Transparency of the scatter points.
-        point (np.ndarray): A reference point to be highlighted.
+        subset (np.ndarray): A reference subset to be highlighted.
         save_path (str): Optional path to save the figure.
         labels (list[str] or tuple): Labels for each objective axis.
         color (list[str]): List of colors to use per method.
-        point_label (str): Label for the reference point.
+        subset_label (str): Label for the reference subset.
         title (str): Title for the plot.
         fontsize (int): Font size for labels and title.
         figsize (tuple[int, int]): Size of each subplot.
-        s_factor (int): Scaling factor for scatter point sizes.
-
-    Returns:
-        None
+        s_factor (int): Scaling factor for scatter subset sizes.
     """
-    num_plots: int = len(methods)
-    if isinstance(color, str):
-        color = [color]
+    if subset is None: subset = []
+    if len(subset) > 0 and not isinstance(subset[0], list): subset = [subset]
+    if isinstance(color, str): color = [color]
 
-    layout_configs: dict[int, tuple[int, int]] = {
-        1: (1, 1),
-        2: (1, 2),
-        3: (1, 3),
-        4: (2, 2),
-        5: (2, 3),
-        6: (2, 3),
-        7: (3, 3),
-        8: (3, 3),
-        9: (3, 3),
+    all_data = np.concatenate(list(methods.values()), axis=0)
+    num_objectives = all_data.shape[1]
+    labels = labels if len(labels) != 0 else [f"Objective {i+1}" for i in range(num_objectives)]
+    limits = limits if len(limits) > 0 else _get_limits(all_data)
+
+    nrows, ncols, gs, positions = _get_layout(len(methods), figsize)
+    fig = plt.figure(figsize=(ncols * figsize[0], nrows * figsize[1]))
+    gs = gridspec.GridSpec(nrows, ncols, figure=fig)
+
+    for idx, (key, values) in enumerate(methods.items()):
+        row, col = positions[idx]
+        ax = fig.add_subplot(gs[row, col], projection="3d" if values.shape[1] == 3 else None)
+
+        if num_objectives < 4:
+            _plot_2d_or_3d(
+                ax=ax,
+                values=values,
+                key=key,
+                labels=labels,
+                c=color[idx % len(color)],
+                alpha=alpha,
+                s_factor=s_factor,
+                fontsize=fontsize,
+                limits=limits,
+                x_threshold=x_threshold,
+                y_threshold=y_threshold,
+                threshold_color=threshold_color
+            )
+            if len(subset) > 0:
+                _plot_subset(
+                    ax=ax,
+                    subset=subset,
+                    values=values,
+                    subset_marker=subset_marker,
+                    subset_label=subset_label,
+                    s_factor=s_factor,
+                    fontsize=fontsize
+                )
+        else:
+            _plot_parallel(
+                ax=ax,
+                values=values,
+                key=key,
+                labels=labels,
+                color=color[idx % len(color)],
+                alpha=alpha,
+                s_factor=s_factor,
+                subset=subset,
+                subset_label=subset_label,
+                y_threshold=y_threshold,
+                threshold_color=threshold_color
+            )
+
+    # delete extra subplots
+    total_subplots = nrows * ncols
+    for idx in range(len(methods), total_subplots):
+        fig.add_subplot(gs[positions[idx][0], positions[idx][1]]).axis("off")
+
+    plt.grid(True)
+    fig.tight_layout()
+    if save_path != "": 
+        plt.savefig(save_path, bbox_inches="tight")
+    plt.show()
+
+# ------------------ helpers ------------------
+
+def _get_layout(num_plots: int, figsize: tuple[int, int]) -> tuple[int, int, gridspec.GridSpec, list[tuple[int, int]]]:
+    """Compute subplot layout (rows, cols, positions)."""
+    layout_configs = {
+        1: (1, 1), 2: (1, 2), 3: (1, 3), 4: (2, 2),
+        5: (2, 3), 6: (2, 3), 7: (3, 3), 8: (3, 3), 9: (3, 3),
     }
-
     nrows, ncols = layout_configs.get(
         num_plots,
         (
@@ -71,170 +134,151 @@ def plot_pareto(
     )
     fig = plt.figure(figsize=(ncols * figsize[0], nrows * figsize[1]))
     gs = gridspec.GridSpec(nrows, ncols, figure=fig)
-
-    axes = []
     positions = [(i, j) for i in range(nrows) for j in range(ncols)]
+    return nrows, ncols, gs, positions
 
-    all_data = np.concatenate(list(methods.values()), axis=0)
-
-    num_objectives = all_data.shape[1]
-    default_labels = [f"Objective {i+1}" for i in range(num_objectives)]
-    labels = labels if len(labels) != 0 else default_labels
-
-    if num_objectives < 4:
-        if len(limits) == 0:
-            limits = []
-            for i in range(all_data.shape[1]):
-                limits.append(
-                    (
-                        all_data[:, i].min() - all_data[:, i].std(),
-                        all_data[:, i].max() + all_data[:, i].std(),
-                    )
-                )
-
-        for idx, (key, values) in enumerate(methods.items()):
-            row, col = positions[idx]
-
-            ax: Any = None
-            if values.shape[1] == 3:
-                ax = fig.add_subplot(gs[row, col], projection="3d")
-            else:
-                ax = fig.add_subplot(gs[row, col])
-
-            axes.append(ax)
-
-            c = color[idx % len(color)]
-            ax.grid(True)
-            if values.shape[1] == 2:
-                ax.scatter(
-                    x=values[:, 0],
-                    y=values[:, 1],
-                    alpha=alpha,
-                    c=c,
-                    label=f"{key.upper().replace("_", " ")} Solutions",
-                    edgecolor="k",
-                    linewidth=1.5 * (s_factor // 2),
-                    s=50 * s_factor,
-                )
-            else:
-                ax.scatter(
-                    xs=values[:, 0],
-                    ys=values[:, 1],
-                    zs=values[:, 2],
-                    alpha=alpha,
-                    c=c,
-                    label=f"{key.upper().replace("_", " ")} Solutions",
-                    edgecolor="k",
-                    linewidth=1.5 * (s_factor // 2),
-                    s=50 * s_factor,
-                )
-
-                ax.set_zlabel(
-                    labels[2].replace("_", " ").capitalize(),
-                    fontsize=fontsize,
-                    labelpad=3 * (figsize[0] // 2),
-                )
-                ax.tick_params(axis="z", labelsize=fontsize - 5)
-                ax.set_zlim(limits[2])
-
-            ax.set_xlabel(
-                labels[0].replace("_", " ").capitalize(),
-                fontsize=fontsize,
-                labelpad=3 * (figsize[0] // 2),
-            )
-            ax.set_ylabel(
-                labels[1].replace("_", " ").capitalize(),
-                fontsize=fontsize,
-                labelpad=3 * (figsize[0] // 2),
-            )
-            ax.set_xlim(limits[0])
-            ax.set_ylim(limits[1])
-
-            ax.legend(fontsize=fontsize, loc="upper center")
-            ax.tick_params(axis="x", labelsize=fontsize - 5)
-            ax.tick_params(axis="y", labelsize=fontsize - 5)
-
-            if len(point) != 0:
-                if values.shape[1] == 2:
-                    ax.scatter(
-                        x=point[0],
-                        y=point[1],
-                        marker="X",
-                        c="black",
-                        # c='#FFC145',
-                        edgecolors="k",
-                        s=100 * s_factor,
-                        linewidth=1.5 * (s_factor // 2),
-                        label=point_label,
-                    )
-                else:
-                    ax.scatter(
-                        xs=point[0],
-                        ys=point[1],
-                        zs=point[2],
-                        marker="X",
-                        c="black",
-                        # c='#FFC145',
-                        edgecolors="k",
-                        s=100 * s_factor,
-                        linewidth=1.5 * (s_factor // 2),
-                        label=point_label,
-                    )
-
-                ax.legend(fontsize=fontsize - 5)
-
-    else:
-        for idx, (key, values) in enumerate(methods.items()):
-            row, col = positions[idx]
-            ax = fig.add_subplot(gs[row, col])
-
-            objs = methods[key]
-            df = pd.DataFrame(objs, columns=labels)
-            df["Method"] = f"{key.upper()} Solutions"
-
-            df.iloc[:, :-1] = (df.iloc[:, :-1] - df.iloc[:, :-1].min()) / (
-                df.iloc[:, :-1].max() - df.iloc[:, :-1].min()
-            )
-
-            c = color[idx % len(color)]
-
-            parallel_coordinates(
-                df, class_column="Method", color=c, alpha=alpha, ax=ax, linewidth=1.5
-            )
-                
-            if len(point) != 0:
-                point = np.array(point).reshape(1, -1)
-                df_point = pd.DataFrame(point, columns=labels)
-                df_point["Solution"] = [point_label]
-
-                parallel_coordinates(
-                    df_point,
-                    class_column="Solution",
-                    color="black",
-                    # color='#FFC145',
-                    alpha=1.0,
-                    linewidth=1.5 * (s_factor // 2),
-                )
-            ax.set_xticklabels(df.columns[:-1], rotation=45, fontsize=fontsize)
-            plt.xlabel("Objectives", fontsize=14)
-            plt.ylabel("Values", fontsize=14)
-
-    total_subplots = nrows * ncols
-    for idx in range(num_plots, total_subplots):
-        fig.add_subplot(gs[positions[idx][0], positions[idx][1]]).axis("off")
-
-    #fig.suptitle(title, fontsize=fontsize + 5)
-    fig.tight_layout()  # rect=[0, 0.1, 1, 1])
-    # fig.subplots_adjust(wspace=-.3)
-    if save_path != "":
-        plt.savefig(
-            save_path,
-            # transparent=True,
-            bbox_inches="tight",
+def _get_limits(all_data: np.ndarray) -> list[tuple[float, float]]:
+    """Compute axis limits with margins."""
+    return [
+        (
+            all_data[:, i].min() - all_data[:, i].std(),
+            all_data[:, i].max() + all_data[:, i].std(),
         )
-    plt.show()
+        for i in range(all_data.shape[1])
+    ]
+
+def _plot_subset(
+    ax: Axes | Axes3D,
+    subset: npt.NDArray[np.float64] | list[float],
+    values: npt.NDArray[np.float64],
+    subset_marker: str | list[str],
+    subset_label: str | list[str],
+    s_factor: float,
+    fontsize: int,
+) -> None:
+    """Plot reference subset points (2D or 3D)."""
+    subset_array = np.atleast_2d(np.array(subset))
+    if isinstance(subset_marker, str):
+        subset_marker = [subset_marker] * len(subset)
+    if isinstance(subset_label, str):
+        subset_label = [subset_label]
+
+    
+
+    for i, p in enumerate(subset_array):
+        kwargs = dict(
+            marker=subset_marker[i],
+            c="black", edgecolors="k",
+            s=70 * s_factor,
+            linewidth=1.5 * (s_factor // 2),
+            label=subset_label[i] if i == 0 or len(subset_label) > 1 else None,
+        )
+        if values.shape[1] == 2:
+            ax.scatter(x=p[0], y=p[1], **kwargs)
+        else:
+            ax.scatter(xs=p[0], ys=p[1], zs=p[2], **kwargs)
+
+    ax.legend(fontsize=fontsize - 5)
+
+def _plot_2d_or_3d(
+    ax: Any,
+    values: np.ndarray,
+    key: str,
+    labels: list[str] | tuple,
+    c: str | list[str],
+    alpha: float,
+    s_factor: float,
+    fontsize: int,
+    limits: list[tuple[float, float]],
+    x_threshold: int | float | None = None,
+    y_threshold: int | float | None = None,
+    threshold_color: str = "#313695"
+) -> None:
+    """Handle 2D/3D scatter plots."""
+    rotation_y=90
+    if values.shape[1] == 2:
+        ax.scatter(
+            x=values[:, 0], y=values[:, 1],
+            alpha=alpha, c=c,
+            label=f"{key.upper().replace('_', ' ')} Solutions",
+            edgecolor="k", linewidth=1.5 * (s_factor // 2),
+            s=50 * s_factor,
+        )
+    else:
+        ax.scatter(
+            xs=values[:, 0], ys=values[:, 1], zs=values[:, 2],
+            alpha=alpha, c=c,
+            label=f"{key.upper().replace('_', ' ')} Solutions",
+            edgecolor="k", linewidth=1.5 * (s_factor // 2),
+            s=50 * s_factor,
+        )
+        ax.set_zlabel(labels[2].capitalize(), fontsize=fontsize, labelpad=1, rotation=90)
+        ax.tick_params(axis="z", labelsize=fontsize - 5, pad=3.5)
+        ax.set_zlim(limits[2])
+        rotation_y = 45
+
+    if x_threshold is not None:
+        plt.axvline(x=x_threshold, color=threshold_color, linestyle="--", linewidth=3, label="Threshold")
+    if y_threshold is not None:
+        plt.axhline(y=y_threshold, color=threshold_color, linestyle="--", linewidth=3, label="Threshold")
+
+    ax.set_xlabel(labels[0].capitalize(), fontsize=fontsize, labelpad=8)
+    ax.set_ylabel(labels[1].capitalize(), fontsize=fontsize,  labelpad=6, rotation=rotation_y)
+    ax.set_xlim(limits[0])
+    ax.set_ylim(limits[1])
+    ax.legend(fontsize=fontsize, loc="upper right")
+    ax.tick_params(axis="x", labelsize=fontsize - 5, pad=1) 
+    ax.tick_params(axis="y", labelsize=fontsize - 5, pad=1)
+    ax.grid()
+
+def _plot_parallel(
+    ax: Axes,
+    values: np.ndarray,
+    key: str,
+    labels: list[str] | tuple,
+    color: str | list[str],
+    alpha: float,
+    s_factor: float,
+    subset: np.ndarray | list[np.ndarray] | list[float],
+    subset_label: str | list[str],
+    y_threshold: int | float | None = None,
+    threshold_color: str = "#313695"
+) -> None:
+    """Handle parallel coordinates plot (>=4 objectives)."""
+    df = pd.DataFrame(values, columns=labels)
+    df["Method"] = f"{key.upper()} Solutions"
+
+    # normalize
+    df.iloc[:, :-1] = (df.iloc[:, :-1] - df.iloc[:, :-1].min()) / (
+        df.iloc[:, :-1].max() - df.iloc[:, :-1].min()
+    )
+
+    parallel_coordinates(df, class_column="Method", color=color, alpha=alpha, ax=ax, linewidth=1.5)
+    
+    if y_threshold is not None:
+        plt.axhline(y=y_threshold, color=threshold_color, linestyle="--", linewidth=3, label="Threshold")
+
+    if subset is not None and len(subset) != 0:
+        df_subset = pd.DataFrame(np.array(subset), columns=labels)
+
+        if isinstance(subset_label, list):
+            df_subset["Solution"] = subset_label
+        else:
+            df_subset["Solution"] = [subset_label] * len(subset)
+
+        parallel_coordinates(
+            df_subset, class_column="Solution", color=["#a50026", "#f46d43", '#fdae61'],
+            alpha=1.0, linewidth=1.5 * (s_factor // 2), ax=ax
+        )
+
+    ax.set_xticklabels(df.columns[:-1], rotation=45, fontsize=16)
+    ax.tick_params(axis="y", labelsize=16)
+    plt.xlabel("Objectives", fontsize=20)
+    plt.ylabel("Values", fontsize=20)
 
 
+### PARETO FRONTIER WITH PLOTLY
+# ------------------ main ------------------
 def plot_pareto_plotly(
     methods: dict[Any, Any],
     point: npt.NDArray[np.float64] = np.array([]),
@@ -304,7 +348,7 @@ def plot_pareto_plotly(
             figsize=figsize,
         )
 
-
+# ------------------ helpers ------------------
 def plot_pareto_plotly_2d(
     methods: dict[Any, Any],
     point: npt.NDArray[np.float64] = np.array([]),
@@ -656,8 +700,7 @@ def plot_pareto_plotly_4d(
     if save_path != "":
         fig.write_html(save_path)
 
-
-
+### HYPERVOLUME
 def plot_hypervolume(
     hypervolume_values: list[float], 
     method: str = "", 
@@ -703,9 +746,6 @@ def plot_multiple_hypervolumes(
     Returns:
         None
     """
-    #if len(colors) == 0:
-    #    colors = plt.cm.tab10.colors
-    # method_names = list(methods_hv.keys())
     if isinstance(colors, str):
         colors = [colors]
 
@@ -764,31 +804,31 @@ def plot_multiple_hypervolumes(
 
         plt.xlabel("Iterations")
         plt.ylabel("Hypervolume")
-        #plt.title("Hypervolume Evolution Across Methods")
+        # plt.title("Hypervolume Evolution Across Methods")
         plt.legend(loc="lower right")
         plt.grid(True)
         plt.tight_layout()
         plt.show()
         if save_path != "":
-            plt.savefig(save_path)
+            plt.savefig(save_path, bbox_inches="tight")
 
-
+### MARGIN EVOLUTION
 def plot_mu_evolution(
-    mu_values: list[Any], 
+    importance: list[Any], 
     title: str = "Margin Evolution"
 ) -> None:
     """
     Plots the evolution of mu (e.g., margin or score) over iterations.
 
     Args:
-        mu_values (list): Values of mu.
+        importance (list): Values of mu.
         title (str): Plot title.
 
     Returns:
         None
     """
     plt.figure(figsize=(6, 4))
-    plt.plot(mu_values, color="purple", linewidth=2)
+    plt.plot(importance, color="purple", linewidth=2)
     plt.xlabel("Iterations")
     plt.ylabel("mu")
     plt.title(title)
@@ -798,6 +838,7 @@ def plot_mu_evolution(
 
 from math import ceil
 # TODO: Only for dissertation
+### PARETO FRONTIER WITH LIMIT SCALE
 def plot_pareto_2d_set_limit_(
     pareto_dict: dict[Any, Any],
     show_subplot: bool = True,
@@ -1080,3 +1121,4 @@ def plot_pareto_set_limit(
             bbox_inches="tight",
         )
     plt.show()
+

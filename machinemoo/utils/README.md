@@ -11,8 +11,9 @@ The `utils` module contains general-purpose utilities to support the machinemoo 
 Import the logger from the module to use consistent logging throughout the project:
 
 ```python
-from machinemoo.utils.logging_config import logger
+from machinemoo.utils.logging_config import get_logger
 
+logger = get_logger(name='name', verbose=True)
 logger.debug("This is a debug message")
 logger.info("Informational message")
 ```

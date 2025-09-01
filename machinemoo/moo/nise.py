@@ -17,18 +17,19 @@ Reference:
 import copy
 import time
 import bisect
-import logging
 import numpy as np
 import numpy.typing as npt
 import warnings
 
 from machinemoo.utils.typing import scalar
-from machinemoo.utils.logging_config import logger
-from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
+from machinemoo import get_logger
+from machinemoo import scalar_interface, w_interface, single_interface
 
 __all__ = [
     "nise"
 ]
+
+logger = get_logger(f"moo.{__name__}")
 
 class wNode():
     """Solves a scalarization weight optimization problem for multi-objective learning.
@@ -179,16 +180,13 @@ class wNode():
     def __calcW(self) -> None:
         """Solve linear system to compute new weighting vector."""
         objs = [i.objs for i in self.__parents]
-        print(objs)
+        logger.debug(objs)
         X = [[i for i in self.__normf(p.objs)]+[-1] for p in self.__parents]
         X = np.array(X + [[1]*self.__M+[0]])
         y = [0]*self.__M+[1]
 
-
         try:
             w_ = np.linalg.solve(X, y)[:self.__M]
-            # if self.__w:
-            #     print("weights:",self.__w)
             if self.__norm:
                 w_ = w_/(self.__globalU-self.__globalL)
 
@@ -228,8 +226,6 @@ class nise():
             timeLimit (float): Maximum execution time. Default is infinity.
             objective (str): Distance metric to compute node importance. Default is 'l2'.
         """
-        #self.__solutionsList = scalar_interface
-        #self.__solutionsList = w_interface
         if (not isinstance(weightedScalar, scalar_interface) or
             not isinstance(weightedScalar, w_interface) or
             not isinstance(singleScalar, scalar_interface) or
@@ -328,7 +324,6 @@ class nise():
         parents = []
         for i in range(self.__M):
             singleS = copy.copy(self.__singleScalar)
-            print('Finding '+str(i)+'th individual minima')
             logger.debug('Finding '+str(i)+'th individual minima')
             try:
                 singleS.optimize(i, hotstart=self.hotstart)
@@ -388,8 +383,7 @@ class nise():
         if self.__candidatesList != []:
             self.__currImp = self.__candidatesList[-1].importance
         gap = self.currImp/self.__maxImp
-        print((str(len(self.solutionsList))+'th solution' +
-                     ' - importance: ' + str(gap)))
+
         logger.debug(str(len(self.solutionsList))+'th solution' +
                      ' - importance: ' + str(gap))
 
@@ -407,8 +401,6 @@ class nise():
             boxW = wNode(parents, self.__globalL, self.__globalU,
                           self.__weightedScalar, norm=self.__norm, 
                           distance=self.__objective)
-            
-            #print(boxW.w)
 
             # avoiding over representation of some regions
             maxdist = max(abs(parents[0].objs-parents[1].objs)/(self.__globalU-self.__globalL))
@@ -437,3 +429,4 @@ class nise():
             self.update(node, solution)
             node = self.select()
         self.__fit_runtime = time.perf_counter() - start
+        logger.info(f"Fit runtime: {self.__fit_runtime:.2f} seconds")

@@ -21,12 +21,14 @@ import numpy as np
 import numpy.typing as npt
 
 from machinemoo.utils.typing import scalar
-from machinemoo.utils.logging_config import logger
+from machinemoo.utils.logging_config import get_logger
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
 
 __all__ = [
     "monise"
 ]
+
+logger = get_logger(f"moo.{__name__}")
 
 #MAXINT = 200000000000000
 MAXINT = 2000000000
@@ -100,10 +102,6 @@ class weight_solv():
         """
         return self.__importance
 
-    #@property
-    #def parents(self):
-    #    return self.__parents
-
     @property
     def solution(self) -> scalar:
         """The current optimized solution.
@@ -131,12 +129,6 @@ class weight_solv():
         Returns:
             scalar: Optimized solution for this weight vector.
         """
-        #self.__solution = copy.copy(self.__weightedScalar)
-        #try:
-        #    self.__solution.optimize(self.w, [])
-        #except:
-        #    self.__solution.optimize(self.w)
-        #return self.__solution
         best_solution = np.zeros(self.M)
         best_objective = np.inf
 
@@ -634,3 +626,4 @@ class monise():
             next_wsol = self._next()
 
         self.__fit_runtime = time.perf_counter() - start
+        logger.info(f"Fit runtime: {self.__fit_runtime:.2f} seconds")

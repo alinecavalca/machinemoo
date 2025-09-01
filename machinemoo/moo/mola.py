@@ -1,30 +1,29 @@
 import copy
 import time
-from typing import Any
-#from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
 import matplotlib.pyplot as plt
-
 import pyomo.environ as pyo
 from pyomo.contrib import appsi
-
 from pymoo.indicators.hv import HV
 
-from machinemoo.utils.logging_config import logger
-from machinemoo import scalar_interface, w_interface, single_interface
+from typing import Any
+
+from machinemoo import get_logger
+from machinemoo import scalar_interface, w_interface
 from machinemoo.utils.typing import scalar
 
 __all__ = [
     "Mola"
 ]
 
+logger = get_logger(f"moo.{__name__}")
+
 # For reproducibility, uncomment the line below to fix the NumPy random seed in this file.
 np.random.seed(42) # TODO: Comment after dissertation
 
 EPS = 1e-8
-
 
 
 class WeightSolver:
@@ -39,25 +38,19 @@ class WeightSolver:
         self,
         solutions: list[scalar],
         global_lower: npt.NDArray[np.float64],
-        global_upper: npt.NDArray[np.float64],
         scalarizer: scalar,
-        goal: float = float("inf"),
         time_limit: float = 10.0,
         mip_gap: float = 0.01,
-        norm: bool = False,
-        epsilon: float = 0.05
+        epsilon: float = 1e-8
     ) -> None:
         """Initializes the WeightSolver.
 
         Args:
             solutions (list[scalar]): Array of candidate solutions with objective vectors.
             global_lower (np.ndarray): Global lower bounds of the objectives.
-            global_upper (np.ndarray): Global upper bounds of the objectives.
             scalarizer (scalar): Scalarization function used for optimization.
-            goal (float): Target importance value to reach (unused in logic). Default is infinity.
             time_limit (float): Time limit (in seconds) for solving the MILP problem. Default is 10.0.
             mip_gap (float): Acceptable optimality gap for MILP solver. Default is 0.01.
-            norm (bool): Whether to normalize objective vectors (unused here). Default is False.
             epsilon (float): Tolerance for minimum improvement in dominance conditions. Default is 0.05.
         """
         self._scalarizer: scalar = scalarizer
@@ -239,21 +232,12 @@ class WeightSolver:
 
         self._solution = copy.copy(best_solution)
         self._solution.optimize(self.weights)
-        #self._solution = copy.copy(self._scalarizer)
-        #self._solution.optimize(self.weights)
+
         self.ml_model = self._solution.x
         if np.all(np.equal(self._solution.objs, best_solution.objs)):
            self.best_solution_reached = True
         return self._solution
 
-    #def optimize(self) -> single_interface:
-    #    best = min(self._solutions, key=lambda s: self.weights @ s.objs)
-    #    self._solution = copy.copy(best)
-    #    self._solution.optimize(self.weights)
-    #    self.ml_model = self._solution.x
-    #    if np.all(np.equal(self._solution.objs, best.objs)):
-    #        self.best_solution_reached = False
-    #    return self._solution
 
 class Mola:
     """MOLA: Multi-Objective Learning Algorithm
@@ -295,6 +279,7 @@ class Mola:
 
         self._weighted_scalar: scalar = weighted_scalar
         self._single_scalar: scalar = single_scalar
+        self._num_objs = self._single_scalar.M
         self._target_gap = target_gap
         self._node_time_limit = node_time_limit
         self._node_gap = node_gap
@@ -433,28 +418,22 @@ class Mola:
         Returns:
             WeightSolver: The first weighted solution used to start the optimization.
         """
-        self._M = self._single_scalar.M
         parents = []
 
-        for i in range(self._M):
+        for i in range(self._num_objs):
             logger.debug(f"Finding {i+1}th individual minimum")
             single_scalar = copy.copy(self._single_scalar)
             single_scalar.optimize(i)
             self._solutions_list.append(single_scalar)
             self.history_list.append(single_scalar)
             parents.append(single_scalar)
-        
-        objs = np.array([[o for o in p.objs] for p in parents])
-        num_objs = len(objs[0])
-        self._global_lower = self._update_global_lower(num_objs=num_objs)
-        self._global_upper = objs.max(axis=0)
+
+        self._global_lower = self._update_global_lower(num_objs=self._num_objs)
 
         first_w_solution = WeightSolver(
-            parents,
-            self._global_lower,
-            self._global_upper,
-            self._weighted_scalar,
-            norm=self._norm
+            solutions=parents,
+            global_lower=self._global_lower,
+            scalarizer=self._weighted_scalar,
         )
 
         self._max_imp = first_w_solution.importance
@@ -547,10 +526,8 @@ class Mola:
         else:
             self._solutions_list.append(solution)
 
-        objs = np.array([[o for o in s.objs] for s in self._solutions_list])
         num_objs = len(solution.objs)
         self._global_lower = self._update_global_lower(num_objs=num_objs)
-        self._global_upper = objs.max(axis=0)
 
     def _next(self) -> WeightSolver:
         """Computes the next weighted solution.
@@ -559,29 +536,14 @@ class Mola:
             WeightSolver: The next weighted solution to be optimized.
         """
         next_w_solution = WeightSolver(
-            self._solutions_list,
-            self._global_lower,
-            self._global_upper,
-            self._weighted_scalar,
-            goal=self.curr_imp * self._red_fact,
+            solutions=self._solutions_list,
+            global_lower=self._global_lower,
+            scalarizer=self._weighted_scalar,
             time_limit=self._node_time_limit,
             mip_gap=self._node_gap,
-            norm=self._norm
         )
         self._importances.append(next_w_solution.importance)
         return next_w_solution
-
-    def plot_mu(self) -> None:
-        """Plots the evolution of the margin (mu) over optimization iterations.
-
-        Useful for analyzing the convergence behavior of the algorithm.
-        """
-        plt.plot(self._importances, color="purple", linewidth=2)
-        plt.xlabel("Iterations")
-        plt.ylabel("mu")
-        plt.title("Evolution of margin over iterations")
-        plt.grid()
-        plt.show()
 
     def optimize(self) -> None:
         """Runs the full MOLA optimization process.
@@ -600,15 +562,15 @@ class Mola:
         count = 0
 
         while (#self.curr_imp / self._max_imp > self._target_gap and
-               len(self.solutions_list) < self._target_size
-               or len(self.history_list) < self._target_size
-               #or count <= self._target_size
-               ):
+            len(self.solutions_list) < self.target_size
+            or len(self.history_list) < self.target_size
+            #or count <= self._target_size
+            ):
 
             logger.debug(f"Iteration {count+1}")
             logger.debug(f"Solutions list: {[s.objs for s in self.solutions_list]}")       
             count += 1
-            if count >= self._target_size:
+            if count >= self.target_size:
                 break
             solution = next_w_solution.optimize()
             solution_set.append(solution.objs)
@@ -623,6 +585,5 @@ class Mola:
             self.update(solution)
             next_w_solution = self._next()
 
-        self.plot_mu()
         self._fit_runtime = time.perf_counter() - start
         logger.info(f"Fit runtime: {self._fit_runtime:.2f} seconds")

@@ -22,12 +22,14 @@ import numpy as np
 import numpy.typing as npt
 
 from machinemoo.utils.typing import scalar
-from machinemoo.utils.logging_config import logger
+from machinemoo.utils.logging_config import get_logger
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
 
 __all__ = [
     "random_weights"
 ]
+
+logger = get_logger(f"moo.{__name__}")
 
 class weight_iter():
     """Solves a scalarization weight optimization problem for multi-objective learning.
@@ -80,8 +82,6 @@ class weight_iter():
         Returns:
             np.ndarray: The optimized solution object.
         """
-        #self.__solution = copy.copy(self.__weightedScalar)
-        #self.__solution.optimize(self.w)
         best_solution = None
         best_objective = np.inf
 
@@ -254,3 +254,4 @@ class random_weights():
             self.update(solution)
             node = self.select()
         self.__fit_runtime = time.perf_counter() - start
+        logger.info(f"Fit runtime: {self.__fit_runtime:.2f} seconds")

@@ -1,4 +1,4 @@
-# Multi-Objective Optimization (MOO) Module
+# Multi-Objective Optimization (MOO) Module 🐮
 
 This module provides a unified interface for solving multi-objective optimization problems using scalarization-based methods.
 

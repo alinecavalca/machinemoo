@@ -1,4 +1,4 @@
-# MachineMOO
+# MachineMOO 🐮
 
 `MachineMOO` is a Python library designed for multi-objective optimization (MOO) with machine learning models. It provides modular components to facilitate scalarization strategies, optimization methods, ensembles, metrics, visualization, and utility functions — all aimed at simplifying research and application of MOO problems.
 

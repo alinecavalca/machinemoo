@@ -1,119 +1,72 @@
 import numpy as np
-import numpy.typing as npt
-from typing import Any, Literal
-from sklearn.exceptions import NotFittedError
-from sklearn.ensemble._bagging import BaggingRegressor
-from sklearn.ensemble import (AdaBoostClassifier, BaggingClassifier, VotingClassifier)
-
-import pandas as pd
-from numpy.typing import ArrayLike
-
+from typing import Any
 from machinemoo.utils.typing import MatrixLike
-from machinemoo.utils.logging_config import logger
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 
-class Ensemble():
+def voting_ensemble(
+    models: list[BaseEstimator | ClassifierMixin | RegressorMixin],
+    X: MatrixLike,
+    task: str = "classification",   # "classification" ou "regression"
+    voting: str = "hard"            # "hard", "soft" (classificação) ou "mean" (regressão)
+) -> Any:
+    """Combine predictions from trained models into an ensemble result.
+    
+    Args:
+        models (list): List of trained sklearn-like models.
+        X (array-like): Input features for prediction.
+        task (str, default="classification"): Task type - "classification" or "regression".
+        voting (str, default="hard"): Voting strategy:
+            - For classification: "hard" (majority voting) or "soft" (average probabilities).
+            - For regression: only "mean" (average predictions).
+    
+    Returns
+    
+        Classification (hard): np.ndarray of predicted classes
+        Classification (soft): (np.ndarray of predicted classes, np.ndarray of averaged probabilities)
+        Regression (mean): np.ndarray of averaged predictions
     """
-    Wrapper for ensemble learning using multiple trained models obtained 
-    through multi-objective optimization.
+    
+    if task == "classification":
+        if voting == "hard":
+            preds = np.array([model.predict(X) for model in models])
+            # voto majoritário
+            final_preds = np.apply_along_axis(
+                lambda x: np.bincount(x).argmax(), axis=0, arr=preds
+            )
+            return final_preds
+        
+        elif voting == "soft":
+            probs = np.array([model.predict_proba(X) for model in models])
+            avg_probs = np.mean(probs, axis=0)
+            final_preds = np.argmax(avg_probs, axis=1)
+            return final_preds, avg_probs
+        
+        else:
+            raise ValueError("For classification, voting must be 'hard' or 'soft'.")
+    
+    elif task == "regression":
+        if voting == "mean":
+            preds = np.array([model.predict(X) for model in models])
+            final_preds = np.mean(preds, axis=0)
+            return final_preds
+        else:
+            raise ValueError("For regression, only 'mean' voting is supported.")
+    
+    else:
+        raise ValueError("Task must be either 'classification' or 'regression'.")
 
-    Currently supports scikit-learn ensembles such as VotingClassifier, 
-    BaggingClassifier, and AdaBoostClassifier.
-    """
-    def __init__(
-            self, 
-            models: Any, 
-            X_train: MatrixLike | ArrayLike, 
-            y_train: ArrayLike,
-            ensemble_type: str = 'voting', 
-            voting_type: Literal['hard', 'soft'] = 'soft',
-        ) -> None:
-        """Initializes the Ensemble object.
+def weighted_soft_voting(
+        models: list[BaseEstimator | ClassifierMixin | RegressorMixin],
+        X: MatrixLike,
+        weights: list[int | float]
+    ):
+    probs = np.array([model.predict_proba(X) for model in models])
+    weighted_avg = np.average(probs, axis=0, weights=weights)
+    preds = np.argmax(weighted_avg, axis=1)
+    return preds, weighted_avg
 
-        Args:
-            models (Any): List of trained models to include in the ensemble.
-            X_train (ArrayLike): Training features.
-            y_train (ArrayLike): Training labels.
-            ensemble_type (str, optional): Type of ensemble method to use. Defaults to 'voting'.
-            voting_type (str, optional): Voting strategy for classification ('hard' or 'soft'). Defaults to 'soft'.
-        """
-        self.ensemble_type  = ensemble_type
-        self.voting_type = voting_type
-
-        self.models  = models
-        self.X_train = X_train
-        self.y_train = y_train
-        self.ensemble_model= self._create_ensemble()
-
-    def _create_ensemble(self) -> Any:
-        """Creates and fits the ensemble model based on the selected type.
-
-        Supported types:
-            - 'voting': Uses VotingClassifier with the provided models.
-            - 'baggin': Uses BaggingClassifier (with the first model as base).
-            - 'adaboost': Uses AdaBoostClassifier (with the first model as base).
-
-        Returns:
-            Any: A fitted ensemble model.
-        """
-        ensemble_model = None
-        try:
-            if self.ensemble_type == 'voting':
-                ensemble_model = VotingClassifier(estimators=[(f'model_{i}', model) for i, model in enumerate(self.models)],
-                                                    voting=self.voting_type)
-            elif self.ensemble_type == 'baggin':
-                ensemble_model = BaggingClassifier(estimator=self.models[0], n_estimators=10)
-
-            elif self.ensemble_type == 'adaboost':
-                ensemble_model = AdaBoostClassifier(estimator=self.models[0], n_estimators=10)
-            else:
-                raise ValueError(f"Unsupported ensemble type: '{self.ensemble_type}'")
-
-            return ensemble_model.fit(self.X_train, self.y_train)
-
-        except Exception as e:
-            logger.error(f"Failed to create ensemble model ({self.ensemble_type}): {e}")
-            return None
-
-    def predict(self, X: npt.NDArray[np.float64]) -> Any | None:
-        """Makes predictions using the ensemble model.
-
-        Args:
-            X (np.ndarray): Input feature data.
-
-        Returns:
-            Any or None: Predicted labels, or None if prediction fails.
-        """
-        try:
-            return self.ensemble_model.predict(X)
-        except NotFittedError:
-            logger.warning("Ensemble model has not been fitted.")
-        except ValueError as e:
-            logger.warning(f"Invalid input data: {e}")
-        except AttributeError as e:
-            logger.warning(f"Ensemble model is not properly initialized: {e}")
-        except Exception as e:
-            logger.warning(f"Prediction failed: {e}")
-        return None
-
-    def predict_proba(self, X: npt.NDArray[np.float64]) -> Any | None:
-        """Predicts class probabilities using the ensemble model.
-
-        Only available if the ensemble supports `predict_proba` (e.g., soft voting).
-
-        Args:
-            X (np.ndarray): Input feature data.
-
-        Returns:
-            Any or None: Predicted probabilities, or None if prediction fails.
-        """
-        try:
-            return self.ensemble_model.predict_proba(X)
-        except NotFittedError:
-            logger.warning("Ensemble model has not been fitted.")
-        except ValueError as e:
-            logger.warning(f"Invalid input data: {e}")
-        except AttributeError as e:
-            logger.warning(f"Ensemble model is not properly initialized: {e}")
-        except Exception as e:
-            logger.warning(f"Prediction failed: {e}")
-        return None
+def max_rule(models: list[BaseEstimator | ClassifierMixin | RegressorMixin], X: MatrixLike):
+    probs = np.array([model.predict_proba(X) for model in models])
+    max_probs = np.max(probs, axis=0)
+    preds = np.argmax(max_probs, axis=1)
+    return preds, max_probs
