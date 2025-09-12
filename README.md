@@ -8,7 +8,7 @@
 
 - **MOO Handler**: Implementations of popular MOO algorithms (NISE, MONISE, MOLA, Random Weights) with a unified interface.
 - **Scalarization Module**: Base classes and examples to create custom scalarization methods that convert multi-objective problems into single-objective ones.
-- **Analysis Module**: Metrics computation (e.g., hypervolume), ensemble learning integration, and visualization tools for Pareto frontiers and other MOO-related plots.
+- **Analysis Module**: Metrics computation (e.g., hypervolume), ensemble learning integration, strategies for a posteriori decision-making, and visualization tools for Pareto frontiers and other MOO-related plots.
 - **Utils**: Common utilities like centralized logging configuration to streamline development and debugging.
 
 ---

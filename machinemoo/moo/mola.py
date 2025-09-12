@@ -23,7 +23,7 @@ logger = get_logger(f"moo.{__name__}")
 # For reproducibility, uncomment the line below to fix the NumPy random seed in this file.
 np.random.seed(42) # TODO: Comment after dissertation
 
-EPS = 1e-8
+#EPS = 1e-8
 
 
 class WeightSolver:
@@ -38,7 +38,7 @@ class WeightSolver:
         self,
         solutions: list[scalar],
         global_lower: npt.NDArray[np.float64],
-        scalarizer: scalar,
+        #scalarizer: scalar,
         time_limit: float = 10.0,
         mip_gap: float = 0.01,
         epsilon: float = 1e-8
@@ -53,13 +53,13 @@ class WeightSolver:
             mip_gap (float): Acceptable optimality gap for MILP solver. Default is 0.01.
             epsilon (float): Tolerance for minimum improvement in dominance conditions. Default is 0.05.
         """
-        self._scalarizer: scalar = scalarizer
-        self._num_objectives: int = solutions[0].M
-        self._global_lower: npt.NDArray[np.float64] = global_lower
-        self._solutions: list[scalar] = solutions
-        self._time_limit: float = time_limit
-        self._mip_gap: float =  mip_gap
-        self._epsilon: float = epsilon
+        #self._scalarizer = scalarizer
+        self._num_objectives = solutions[0].M
+        self._global_lower = global_lower
+        self._solutions = solutions
+        self._time_limit = time_limit
+        self._mip_gap =  mip_gap
+        self._epsilon = epsilon
 
         self.ml_model = None
         self.best_solution_reached = False
@@ -141,7 +141,7 @@ class WeightSolver:
 
         for objs in objs_list:
             constr = sum(model.w[j] * (model.y_sup[j] - y_star[j]) for j in range(num_objs)) <= \
-                     sum(model.w[j] * max(objs[j]-y_star[j],  EPS)  for j in range(num_objs))
+                     sum(model.w[j] * max(objs[j]-y_star[j],  self._epsilon)  for j in range(num_objs))
             model.constraints.add(
                 constr
             )
@@ -152,7 +152,7 @@ class WeightSolver:
                 # otherwise model.b[i, j]=1
                 model.constraints.add(
                     (model.y_und[j] - y_star[j]) >=
-                    model.b[i, j] * (objs_list_lower[i][j] - y_star[j]) + EPS
+                    model.b[i, j] * (objs_list_lower[i][j] - y_star[j]) + self._epsilon
                 )
             # in order to y_sup dominate objs_list_lower[i],
             # sum_j model.b[i, j] == 0
@@ -433,7 +433,7 @@ class Mola:
         first_w_solution = WeightSolver(
             solutions=parents,
             global_lower=self._global_lower,
-            scalarizer=self._weighted_scalar,
+            #scalarizer=self._weighted_scalar,
         )
 
         self._max_imp = first_w_solution.importance
@@ -538,7 +538,7 @@ class Mola:
         next_w_solution = WeightSolver(
             solutions=self._solutions_list,
             global_lower=self._global_lower,
-            scalarizer=self._weighted_scalar,
+            #scalarizer=self._weighted_scalar,
             time_limit=self._node_time_limit,
             mip_gap=self._node_gap,
         )
@@ -559,18 +559,15 @@ class Mola:
         hv = HV(ref_point=reference_point)
 
         solution_set = []
-        count = 0
+        iteraction = 0
 
-        while (#self.curr_imp / self._max_imp > self._target_gap and
-            len(self.solutions_list) < self.target_size
-            or len(self.history_list) < self.target_size
-            #or count <= self._target_size
-            ):
+        while (len(self.solutions_list) < self.target_size
+              or len(self.history_list) < self.target_size):
 
-            logger.debug(f"Iteration {count+1}")
+            logger.debug(f"Iteration {iteraction+1}")
             logger.debug(f"Solutions list: {[s.objs for s in self.solutions_list]}")       
-            count += 1
-            if count >= self.target_size:
+            iteraction += 1
+            if iteraction >= self.target_size:
                 break
             solution = next_w_solution.optimize()
             solution_set.append(solution.objs)

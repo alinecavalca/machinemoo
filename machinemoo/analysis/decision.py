@@ -1,6 +1,62 @@
 import numpy as np
 import numpy.typing as npt
 from typing import Any
+import pandas as pd
+from pymcdm.methods import TOPSIS
+
+def topsis_model_selection(losses, metrics=None, criteria_types=None, weights=None, model_names=None):
+    """
+    Perform TOPSIS to select the best model(s) from losses and optional metrics.
+
+    Returns ranking DataFrame and best model info.
+    """
+    losses = np.array(losses)
+    n_models = losses.shape[0]
+
+    # Inicializar matriz
+    data = losses
+
+    # Concatena métricas opcionais
+    if metrics:
+        for metric_name, values in metrics.items():
+            metric_array = np.array(values).reshape(-1, 1)
+            data = np.hstack([data, metric_array])
+
+    # Definir critérios
+    n_criteria = data.shape[1]
+    if criteria_types is None:
+        # losses = -1, métricas = 1
+        criteria_types = [-1]*losses.shape[1]
+        if metrics:
+            criteria_types += [1]*len(metrics)
+
+    # Pesos
+    if weights is None:
+        weights = np.ones(n_criteria) / n_criteria
+
+    # Nomes de modelos
+    if model_names is None:
+        model_names = [f"M{i}" for i in range(n_models)]
+
+    # Aplica TOPSIS
+    topsis = TOPSIS()
+    scores = topsis(data, weights, criteria_types)
+
+    # Ranking (ordenando)
+    ranking_order = np.argsort(-scores)  # do maior score para o menor
+    df = pd.DataFrame({
+        "Model": [model_names[i] for i in ranking_order],
+        "TOPSIS Score": scores[ranking_order],
+        "Original Index": ranking_order
+    })
+    df["Rank"] = np.arange(1, n_models + 1)
+
+    # Melhor modelo (primeiro do ranking)
+    best_index = int(ranking_order[0])  # índice original na lista de entrada
+    best_model_name = model_names[best_index]
+    best_losses = losses[best_index]
+
+    return df, best_index, best_model_name, best_losses
 
 def select_lowest_median_solution(
     objectives: npt.NDArray[np.float64],
@@ -120,3 +176,5 @@ def select_weighted_solution(
         "objectives": filtered_objs[best_idx],
         "model": filtered_models[best_idx]
     }
+
+## TOPSIS

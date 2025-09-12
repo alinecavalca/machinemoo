@@ -110,7 +110,7 @@ class MachineMoo:
 
         Args:
             method (str): Name of the optimization method to use. Must be one of:
-                'mola', 'monise', 'random_weight'.
+                'mola', 'monise', 'random_weights'.
 
         Returns:
             Any: The optimizer instance after execution.
@@ -121,7 +121,7 @@ class MachineMoo:
         methods = {
             'mola': self.moo_mola,
             'monise': self.moo_monise,
-            'random_weight': self.moo_random_weight,
+            'random_weights': self.moo_random_weights,
             'nise': self.moo_nise
         }
 
@@ -176,7 +176,7 @@ class MachineMoo:
         optimizer.optimize()
         return optimizer
 
-    def moo_random_weight(self, **kwargs: Any) -> Any:
+    def moo_random_weights(self, **kwargs: Any) -> Any:
         """Runs the Random Weights optimization algorithm.
 
         Returns:

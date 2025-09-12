@@ -31,9 +31,9 @@ class MLP(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, 128),
             nn.ReLU(),
-            nn.Linear(128, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
+            #nn.Linear(256, hidden_dim),
+            #nn.ReLU(),
+            nn.Linear(128, output_dim),
             nn.Sigmoid(),
         )
 
@@ -132,7 +132,7 @@ class MLPScalarization(Scalarization):
         self.sample_weight = torch.tensor(sample_weight.to_numpy(), dtype=torch.float32)
 
         criterion = nn.BCELoss(weight=self.sample_weight, reduction="mean")
-        optimizer = optim.Adam(
+        optimizer = optim.AdamW(
             self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5
         )
 

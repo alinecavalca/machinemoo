@@ -80,40 +80,31 @@ class LogRegScalarization(Scalarization):
             class_weight=None,
         )
 
-    @property
-    def objs_lower(self) -> npt.NDArray[np.float64]:
-        """Returns a lower estimative of the objective values.
+    def _compute_lipschitz(self) -> np.ndarray:
+        """Returns a lower estimative of the objective values with lipschitz estamation.
 
         Returns:
             np.ndarray: Lower estimative for each objective function.
         """
-        # This is a placeholder, actual implementation may vary
-        if self.__objs_lower is not None:
-            return self.__objs_lower
-        else:
-            if self.lower_bound_estimate == "lipschitz":
-                J = np.array(self.gradient)
-                grad_w = self.w@J
-                L = self.w@self.L
-                objs_delta = 1/L*J@grad_w - 1/2*self.L/(L**2)*(grad_w@grad_w)
-                self.__objs_lower = self.objs - objs_delta
-                logger.debug("L", self.L)
-                logger.debug("Objs delta:", objs_delta)
-                logger.debug("Grad squar:", np.array([grad@grad for l, grad in zip(self.L, self.gradient)]))
-            elif self.lower_bound_estimate == "zero":
-                self.__objs_lower = np.zeros(self.M)
-            else:
-                self.__objs_lower = self.objs - self.lower_bound_estimate * abs(self.objs)
-            return self.__objs_lower
+        J = np.array(self.gradient)
+        grad_w = self.w@J
+        L = self.w@self.L
+        objs_delta = 1/L*J@grad_w - 1/2*self.L/(L**2)*(grad_w@grad_w)
+        objs_lower = self.objs - objs_delta
+        logger.debug("L", self.L)
+        logger.debug("Objs delta:", objs_delta)
+        logger.debug("Grad squar:", np.array([grad@grad for l, grad in zip(self.L, self.gradient)]))
+        return objs_lower
 
     def get_gradient(
         self,
         X_train: MatrixLike,
         y_train: ArrayLike,
-        model: Any
+        model: Any,
+        sample_weight_tensor = None
     ) -> npt.NDArray[np.float64]:
         X_tensor = torch.tensor(np.asarray(X_train), dtype=torch.float32)
-        y_tensor = torch.tensor(np.asarray(y_train), dtype=torch.float32).view(-1, 1)
+        y_tensor = torch.tensor(np.asarray(y_train), dtype=torch.float32)
 
         w = model.coef_.flatten()       # shape: (n_features,)
         b = model.intercept_.item()
@@ -124,8 +115,8 @@ class LogRegScalarization(Scalarization):
         for param in pmodel.parameters():
             param.requires_grad = True
 
-        criterion = nn.BCELoss(reduction='mean')
-        output = pmodel(X_tensor)
+        criterion = nn.BCELoss(weight=sample_weight_tensor, reduction='mean')
+        output = pmodel(X_tensor).squeeze()
         loss = criterion(output, y_tensor)
         loss.backward()
 
@@ -137,8 +128,6 @@ class LogRegScalarization(Scalarization):
         self,
         weight: npt.NDArray[np.float64]
     ) -> tuple[LogisticRegression, npt.NDArray[np.float64], npt.NDArray[np.float64]] | tuple[LogisticRegression, npt.NDArray[np.float64]]:
-        
-        self.__objs_lower = None  # Reset lower bound
         
         if self.M == 2:
             fair_weight = weight
@@ -173,12 +162,21 @@ class LogRegScalarization(Scalarization):
         if self.lower_bound_estimate == "lipschitz":
             group_values = self.X[self.fair_feat].to_numpy()
             gradients = []
-            for g in self.fair_att:
+            for i, g in enumerate(self.fair_att):
                 mask = (group_values == g)
                 Xg = self.X.to_numpy()[mask]
                 yg = self.y.to_numpy()[mask]
 
-                grads = self.get_gradient(Xg, yg, self.model).squeeze()
+                fair_weight = np.zeros(len(self.fair_att))
+                fair_weight[i] = 1
+                sample_weight = self.X[self.fair_feat].replace(
+                    {ff: fw for ff, fw in zip(self.fair_att, fair_weight)}
+                )
+
+                sample_weight_group = sample_weight[mask]
+                sample_weight_tensor = torch.tensor(sample_weight_group.to_numpy(), dtype=torch.float32)
+
+                grads = self.get_gradient(Xg, yg, self.model, sample_weight_tensor).squeeze()
                 gradients.append(grads)
 
             if self.M == 3:

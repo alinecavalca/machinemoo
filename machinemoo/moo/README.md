@@ -48,6 +48,19 @@ Alternatively, you can call a specific method directly:
 moopt = moo(w_scalar).mola(**opt_params)
 ```
 
+### 🔎 Logging options
+
+When creating a `moo` instance, you can control the logging behavior using the parameters `verbose` and `debug`:
+
+```python
+moopt = moo(w_scalar, verbose=True, debug=False).mo_optimization(method, **opt_params)
+```
+
+- `verbose=True` → enables **INFO** messages (progress and general information).  
+- `debug=True` → enables **DEBUG** messages (detailed internal steps). This takes priority over `verbose`.  
+- If both are set to `False`, only **ERROR** messages will be shown (silent mode).  
+
+
 ## 🔧 Parameters
 
 Each method supports slightly different parameters, but most share:

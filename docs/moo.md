@@ -4,21 +4,21 @@ This module provides a unified interface for solving multi-objective optimizatio
 
 ## ✅ Supported Methods
 
-- `NISE`: Non-Inferior Set Estimation (NISE)
-    - A classical scalarization method that iteratively finds Pareto optimal solutions by solving weighted sum problems with carefully chosen weight vectors. Efficient for two-objective problems and provides a convex approximation of the Pareto front.
-- `MONISE`: Many-Objective NISE extension
-    - An extension of NISE designed to handle many-objective problems (more than two objectives). It generalizes the weight selection process to explore the Pareto front in higher dimensions while maintaining computational efficiency.
 - `MOLA`: Multi-objective Learning Algorithm
-    - A machine learning based method that approximates the Pareto front by training scalarization models. It adaptively updates weights and solutions to improve the front coverage, suitable for complex or high-dimensional problems, as non-convex problems (e.g. deep learning).
-- `Random Weight`: Randomly generated weights to explore the Pareto front
-    - A straightforward baseline method that samples random weight vectors to scalarize and optimize objectives. Though simple, it can provide diverse Pareto solutions but may be less efficient or precise than structured methods.
+    - A machine learning based method that approximates the Pareto front by training scalarization models. It adaptively updates weights and solutions to improve the frontier coverage, suitable for complex or high-dimensional problems, as non-convex problems (e.g. deep learning).
+- `NISE`: Non-Inferior Set Estimation (NISE)
+    - A classical scalarization method that iteratively finds Pareto optimal solutions by solving weighted sum problems with carefully chosen weight vectors. Efficient for two-objective problems and provides a convex approximation of the Pareto frontier.
+- `MONISE`: Many-Objective NISE
+    - An extension of NISE designed to handle many-objective problems (more than two objectives). It generalizes the weight selection process to explore the Pareto frontier in higher dimensions while maintaining computational efficiency.
+- `Random Weight`: Randomly generated weights to explore the Pareto frontier
+    - A straightforward method that samples random weight vectors to scalarize and optimize objectives. Though simple, it can provide diverse Pareto solutions.
 
 ## 📦 Installation
 
 Make sure your environment is configured and `machinemoo` is installed and properly set up. Then, simply import and use:
 
 ```bash
-from machinemoo.moo.moo_handler import moo
+from machinemoo import moo
 ```
 
 ## 🚀 Quick Start
@@ -47,6 +47,18 @@ Alternatively, you can call a specific method directly:
 ```python
 moopt = moo(w_scalar).mola(**opt_params)
 ```
+
+### 🔎 Logging options
+
+When creating a `moo` instance, you can control the logging behavior using the parameters `verbose` and `debug`:
+
+```python
+moopt = moo(w_scalar, verbose=True, debug=False).mo_optimization(method, **opt_params)
+```
+
+- `verbose=True` → enables **INFO** messages (progress and general information).  
+- `debug=True` → enables **DEBUG** messages (detailed internal steps). This takes priority over `verbose`.  
+- If both are set to `False`, only **ERROR** messages will be shown (silent mode).  
 
 ## 🔧 Parameters
 
@@ -96,5 +108,6 @@ This structure facilitates easy comparison and analysis of different methods’ 
 
 ## Usage Tips
 
-* Random Weights method is slow for many objectives but finds the optimal solution.
-* MONISE method is better in some cases but only is limit to handle with convex problem.
+* MOLA can handle many objectives and suboptimal solutions.
+* MONISE works with many objectives but is limit to handle with convex problem.
+* Random Weights finds the optimal and suboptimal solution but is slow for many objectives.

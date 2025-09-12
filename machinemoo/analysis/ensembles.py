@@ -59,13 +59,48 @@ def weighted_soft_voting(
         models: list[BaseEstimator | ClassifierMixin | RegressorMixin],
         X: MatrixLike,
         weights: list[int | float]
-    ):
+    ) -> tuple[Any, Any]:
+    """Perform weighted soft voting for classification.
+    
+    Each model provides class probabilities, which are combined into a 
+    weighted average using the specified weights. Final predictions 
+    are obtained from the class with the highest weighted probability.
+    
+    Args:
+        models (list): List of trained sklearn-like classifiers.
+        X (array-like): Input features for prediction.
+        weights (list of int or float): Weights associated with each model, 
+            determining their contribution to the averaged probabilities.
+    
+    Returns:
+        tuple:
+            - np.ndarray: Predicted class labels.
+            - np.ndarray: Weighted average of predicted probabilities.
+    """
     probs = np.array([model.predict_proba(X) for model in models])
     weighted_avg = np.average(probs, axis=0, weights=weights)
     preds = np.argmax(weighted_avg, axis=1)
     return preds, weighted_avg
 
-def max_rule(models: list[BaseEstimator | ClassifierMixin | RegressorMixin], X: MatrixLike):
+def max_rule(
+        models: list[BaseEstimator | ClassifierMixin | RegressorMixin], 
+        X: MatrixLike
+    ) -> tuple[Any, Any]:
+    """Perform maximum rule ensemble for classification.
+    
+    Each model provides class probabilities, and the maximum probability 
+    across all models is selected for each class. Final predictions 
+    correspond to the class with the highest maximum probability.
+    
+    Args:
+        models (list): List of trained sklearn-like classifiers.
+        X (array-like): Input features for prediction.
+    
+    Returns:
+        tuple:
+            - np.ndarray: Predicted class labels.
+            - np.ndarray: Maximum probabilities across models for each class.
+    """
     probs = np.array([model.predict_proba(X) for model in models])
     max_probs = np.max(probs, axis=0)
     preds = np.argmax(max_probs, axis=1)
