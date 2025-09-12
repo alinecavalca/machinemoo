@@ -7,13 +7,11 @@ from collections.abc import Callable
 from inspect import Parameter, signature
 from sklearn.metrics import accuracy_score
 
-from machinemoo.moo.nise import nise
-from machinemoo.moo.mola import Mola
-from machinemoo.moo.monise import monise
-from machinemoo.moo.rennen import rennen
-from machinemoo.moo.random_weights import random_weights
-from machinemoo.analysis.ensembles import Ensemble
-from machinemoo.utils.logging_config import logger
+from machinemoo import Mola
+from machinemoo import nise
+from machinemoo import monise
+from machinemoo import random_weights
+from machinemoo import get_logger
 from machinemoo.utils.typing import scalar, MatrixLike
 
 __all__ = [
@@ -21,6 +19,7 @@ __all__ = [
     'get_objectives',
     'run_ensemble'
 ]
+
 
 class MachineMoo:
     """Machine Learning Multi-Objective Optimization Handler.
@@ -35,20 +34,23 @@ class MachineMoo:
         self,
         weighted_scalar: scalar,
         single_scalar: scalar | None = None,
+        verbose: bool = False,
+        debug: bool = False
     ) -> None:
         """"Initializes the optimization handler with scalarization strategies.
 
         Args:
             weighted_scalar (scalar): Scalarization method used for weighted objectives.
             single_scalar (scalar, optional): Scalarization method for single-objective
-                problems. Defaults to the same as `weighted_scalar` if not provided.
+                        problems. Defaults to the same as `weighted_scalar` if not provided.
+            verbose (bool): Enable INFO logging (ignored if `debug` is True). Default: False.
+            debug (bool): Enable DEBUG logging, taking priority over `verbose`. Default: False. 
+                        If both are False, the logger defaults to ERROR level.
         """
-        self._weighted_scalar: scalar = weighted_scalar
-        #self._single_scalar = single_scalar or weighted_scalar
-        self._single_scalar: scalar | None = single_scalar
+        self.logger = get_logger(name='moo', verbose=verbose, debug=debug)
+        self._weighted_scalar = weighted_scalar
+        self._single_scalar = single_scalar if single_scalar else weighted_scalar
 
-        if self._single_scalar == None:
-            self._single_scalar = self._weighted_scalar
 
     def _filter_kwargs(
         self,
@@ -84,8 +86,8 @@ class MachineMoo:
         ignored = set(converted_params) - valid_keys
 
         if ignored:
-            logger.warning(f"Ignored parameters for {fn.__name__}: {ignored}")
-        logger.debug(f"Filtered parameters for {fn.__name__}: {filtered}")
+            self.logger.warning(f"Ignored parameters for {fn.__name__}: {ignored}")
+        self.logger.debug(f"Filtered parameters for {fn.__name__}: {filtered}")
         return filtered
 
     
@@ -108,7 +110,7 @@ class MachineMoo:
 
         Args:
             method (str): Name of the optimization method to use. Must be one of:
-                'mola', 'monise', 'random_weight'.
+                'mola', 'monise', 'random_weights'.
 
         Returns:
             Any: The optimizer instance after execution.
@@ -119,9 +121,8 @@ class MachineMoo:
         methods = {
             'mola': self.moo_mola,
             'monise': self.moo_monise,
-            'random_weight': self.moo_random_weight,
-            #'rennen': self.moo_rennen,
-            #'nise': self.moo_nise
+            'random_weights': self.moo_random_weights,
+            'nise': self.moo_nise
         }
 
         if method not in methods:
@@ -175,7 +176,7 @@ class MachineMoo:
         optimizer.optimize()
         return optimizer
 
-    def moo_random_weight(self, **kwargs: Any) -> Any:
+    def moo_random_weights(self, **kwargs: Any) -> Any:
         """Runs the Random Weights optimization algorithm.
 
         Returns:
@@ -190,20 +191,6 @@ class MachineMoo:
         optimizer.optimize()
         return optimizer
 
-    def moo_rennen(self, **kwargs: Any) -> Any:
-        """Runs the Rennen optimization algorithm.
-
-        Returns:
-            Any: The Rennen optimizer instance after running optimization.
-        """
-        filtered = self._filter_kwargs(random_weights, params=kwargs, to_camel=True)
-        optimizer = rennen(
-            weightedScalar=self._weighted_scalar,
-            singleScalar=self._single_scalar,
-            **filtered
-        )
-        optimizer.optimize()
-        return optimizer
 
 def get_objectives(optimizer: Any) -> npt.NDArray[np.float64]:
     """Extracts objective vectors from an optimizer's solution list.
@@ -276,20 +263,21 @@ def run_ensemble(
     Raises:
         ValueError: If models could not be extracted or are missing.
     """
-    if models is None:
-        models = getattr(optimizer, 'get_models', lambda: None)()
-    if models is None:
-        raise ValueError("optimizer does not support model extraction for ensemble.")
-
-    ensemble_model = Ensemble(
-        models=models,
-        ensemble_type=ensemble_type,
-        voting_type=voting_type,
-        X_train=X_train,
-        y_train=y_train
-    )
-
-    predictions = ensemble_model.predict(X_test)
-    accuracy: float = accuracy_score(y_test, predictions)
+    #if models is None:
+    #    models = getattr(optimizer, 'get_models', lambda: None)()
+    #if models is None:
+    #    raise ValueError("optimizer does not support model extraction for ensemble.")
+#
+    #ensemble_model = Ensemble(
+    #    models=models,
+    #    ensemble_type=ensemble_type,
+    #    voting_type=voting_type,
+    #    X_train=X_train,
+    #    y_train=y_train
+    #)
+    #predictions = ensemble_model.predict(X_test)
+    #print("pred", predictions)
+    #accuracy: float = accuracy_score(y_test, predictions)
     #print(f'Ensemble Accuracy: {accuracy:.4f}')
-    return accuracy
+    #return accuracy
+    pass

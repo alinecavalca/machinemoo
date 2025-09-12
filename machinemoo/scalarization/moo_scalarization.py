@@ -1,10 +1,10 @@
+import numpy as np
+import numpy.typing as npt
 from typing import Any
 from collections.abc import Callable
 from typing_extensions import Self
-import numpy as np
-import numpy.typing as npt
 
-from machinemoo.scalarization.scalarization_interface import scalar_interface, single_interface, w_interface
+from machinemoo import scalar_interface, single_interface, w_interface
 
 class Scalarization(w_interface, single_interface, scalar_interface):
     """Base class for scalarization strategies in multi-objective optimization.
@@ -13,7 +13,13 @@ class Scalarization(w_interface, single_interface, scalar_interface):
     weight vector. It serves as a base for scalarization methods that learn models 
     or compute solutions using scalarized objectives.
     """
-    def __init__(self, num_objs: int, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+            self,
+            num_objs: int,
+            lower_bound_estimate: str | float = "zero", 
+            *args: Any, 
+            **kwargs: Any
+        ) -> None:
         """Initializes the scalarization state.
 
         Args:
@@ -23,7 +29,9 @@ class Scalarization(w_interface, single_interface, scalar_interface):
         self.__x: Any = None
         self.__gradient = None
         self.__w: np.float64 = np.zeros(num_objs)
-        self.__objs: npt.NDArray[np.float64] = np.zeros(num_objs)
+        self.__objs: npt.NDArray[np.float64] = np.zeros( num_objs)
+        self.lower_bound_estimate = lower_bound_estimate
+        self.__objs_lower = None
         #self.model: Any = None
 
     @property
@@ -61,6 +69,27 @@ class Scalarization(w_interface, single_interface, scalar_interface):
             np.ndarray: Objective values for each objective function.
         """
         return self.__objs
+
+    def _compute_lipschitz(self):
+        raise NotImplementedError("Subclass must implement Lipschitz calculation")
+    
+    @property
+    def objs_lower(self) -> npt.NDArray[np.float64]:
+        """Returns a lower estimative of the objective values.
+        
+        Returns:
+            np.ndarray: Lower estimative for each objective function.
+        """
+        if self.__objs_lower is not None:
+            return self.__objs_lower
+
+        if self.lower_bound_estimate == "lipschitz":
+            self.__objs_lower = self._compute_lipschitz()
+        elif self.lower_bound_estimate == "zero":
+            self.__objs_lower = np.zeros(self.__M)
+        else:
+            self.__objs_lower = self.objs - self.lower_bound_estimate * abs(self.objs)
+        return self.__objs_lower
 
     @property
     def x(self) -> Any:
@@ -129,6 +158,7 @@ class Scalarization(w_interface, single_interface, scalar_interface):
         else:
             raise ValueError("w is in the wrong format")
 
+        self.__objs_lower = None
         result: tuple[Any, Any, Any | None] = self.training(self.__w)
 
         if len(result) == 2:
@@ -141,7 +171,38 @@ class Scalarization(w_interface, single_interface, scalar_interface):
 
         self.__M = len(self.__objs)
         self.__x = model
+
         return self
+
+class LipschitzTorchMixin:
+    """Mixin that provides a Lipschitz calculation using PyTorch."""
+
+    def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
+        """Returns a lower estimative of the objective values with lipschitz estamation.
+
+        Returns:
+            np.ndarray: Lower estimative for each objective function.
+        """
+        w_gradient = self.w@np.array([self.gradient[idx] for idx in range(self.M)])
+        objs_delta = 1/(2*self.w@self.L)*w_gradient@w_gradient
+        self.__objs_lower = self.objs - objs_delta
+        return self.__objs_lower
+
+class LipschitzRegLoghMixin:
+    """Mixin that provides a Lipschitz calculation using Logistic Regression from Scikit Learn."""
+
+    def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
+        """Returns a lower estimative of the objective values with lipschitz estamation.
+
+        Returns:
+            np.ndarray: Lower estimative for each objective function.
+        """
+        J = np.array(self.gradient)
+        grad_w = self.w@J
+        L = self.w@self.L
+        objs_delta = 1/L*J@grad_w - 1/2*self.L/(L**2)*(grad_w@grad_w)
+        self.__objs_lower = self.objs - objs_delta
+        return self.__objs_lower
 
 class MooScalarization(w_interface, single_interface, scalar_interface):
     """Implements scalarization for machine learning models using an external training function.
@@ -207,6 +268,15 @@ class MooScalarization(w_interface, single_interface, scalar_interface):
             np.ndarray: Objective values for each objective function.
         """
         return self.__objs
+    
+    @property
+    def objs_lower(self) -> npt.NDArray[np.float64]:
+        """Returns a lower estimative of the objective values.
+        
+        Returns:
+            np.ndarray: Lower estimative for each objective function.
+        """
+        return self.__objs_lower
 
     @property
     def x(self) -> Any:

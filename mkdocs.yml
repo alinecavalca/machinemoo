@@ -21,7 +21,7 @@ theme:
 
 nav:
   - Home: index.md
-  - Multi-Objective Optimization (moo): moo.md
+  - MOO 🐮: moo.md
   - Scalarization: scalarization.md
   - Analysis Tools: analysis.md
   - Utilities: utils.md

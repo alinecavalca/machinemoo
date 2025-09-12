@@ -8,10 +8,10 @@ Author: Marcos M. Raimundo <marcosmrai@gmail.com>
 """
 # License: BSD 3 clause
 
-from abc import ABCMeta, abstractmethod
-from typing import Any, Self
 import numpy as np
 import numpy.typing as npt
+from typing import Any, Self
+from abc import ABCMeta, abstractmethod
 
 __all__ = [
     "scalar_interface",

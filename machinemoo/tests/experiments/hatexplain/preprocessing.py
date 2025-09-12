@@ -1,6 +1,5 @@
-import random
 from collections import Counter
-from typing import Callable, Union
+from typing import Callable
 
 import numpy as np
 import torch
@@ -10,11 +9,8 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
-seed = 42
-np.random.seed(seed)
-torch.manual_seed(seed)
-torch.cuda.manual_seed_all(seed)
-torch.backends.cudnn.deterministic = True
+from machinemoo.utils.seed_config import set_np_torch_seed
+set_np_torch_seed(42)
 
 
 def make_group_hate_label_func(group_name: str) -> Callable[[dict], int]:
@@ -67,7 +63,7 @@ def extract_bert_embeddings(
 
     embeddings = []
     with torch.no_grad():
-        for i in tqdm(range(0, len(texts), batch_size)):
+        for i in tqdm(range(0, len(texts), batch_size), leave=False):
             batch_texts = texts[i : i + batch_size]
             encoding = tokenizer(
                 batch_texts,
