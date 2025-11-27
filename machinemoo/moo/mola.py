@@ -3,7 +3,6 @@ import time
 
 import numpy as np
 import numpy.typing as npt
-import matplotlib.pyplot as plt
 import pyomo.environ as pyo
 from pyomo.contrib import appsi
 from pymoo.indicators.hv import HV
@@ -152,7 +151,7 @@ class WeightSolver:
                 # otherwise model.b[i, j]=1
                 model.constraints.add(
                     (model.y_und[j] - y_star[j]) >=
-                    model.b[i, j] * (objs_list_lower[i][j] - y_star[j]) + self._epsilon
+                    model.b[i, j] * (objs_list_lower[i][j] - y_star[j])# + self._epsilon
                 )
             # in order to y_sup dominate objs_list_lower[i],
             # sum_j model.b[i, j] == 0
@@ -160,11 +159,12 @@ class WeightSolver:
             model.constraints.add(
                 sum(model.b[i, j] for j in range(num_objs)) >= 1
             )
-        
+        '''
         for j in range(num_objs):
             model.constraints.add(
                 sum(model.b[i, j] for i in range(len(objs_list_lower))) >= 1
             )
+        '''
 
         
         for j in range(num_objs):

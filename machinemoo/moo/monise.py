@@ -13,7 +13,26 @@ Reference:
     arXiv
 """
 # License: BSD 3 clause
-import mip
+try:
+    import gurobipy as gp
+    from gurobipy import GRB
+    import mip
+    # Parâmetros para silenciar o Gurobi
+    params = {
+        "LogToConsole": 0,
+        # "OutputFlag": 0 # Outro sinônimo para o mesmo parâmetro
+    }
+
+    # Crie o ambiente com os parâmetros
+    try:
+        # AVISO: A licença WLS (acadêmica) pode ignorar o LogToConsole
+        # para a mensagem de licença.
+        env = gp.Env(empty=True, params=params) 
+        env.start()
+    except gp.GurobiError as e:
+        print(f"Erro no Gurobi: {e}")
+except ImportError:
+    import mip
 import copy
 import time
 import logging
@@ -23,6 +42,8 @@ import numpy.typing as npt
 from machinemoo.utils.typing import scalar
 from machinemoo.utils.logging_config import get_logger
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
+
+
 
 __all__ = [
     "monise"
@@ -244,7 +265,7 @@ class weight_solv():
         for conN, sols in enumerate(self.solutionsList):
             d, dvec = self.__calcD(sols)
             #expr = v-lp.lpDot(w, self.__normf(sols.objs))
-            expr = v-mip.xsum(w[i]*self.__normf(sols.objs)[i] for i in oidx)
+            expr = v-mip.xsum(w[i]*self.__normf(sols.objs_lower)[i] for i in oidx)
             prob += expr <= 0 #manter
 
         for i in oidx:
@@ -319,7 +340,7 @@ class weight_solv():
         # Inherent constraints of this problem
         for value, sols in enumerate(self.solutionsList):
             expr = mip.xsum(self.__normw(sols.w)[i]*uR[i] for i in oidx)
-            cons = self.__normw(sols.w) @ self.__normf(sols.objs)
+            cons = self.__normw(sols.w) @ self.__normf(sols.objs_lower)#self.__normf(sols.objs_lower)
             prob += expr >= cons*(1-eps)
 
         for i in oidx:
@@ -567,7 +588,7 @@ class monise():
             self.__solutionsList.append(singleS)
             parents.append(singleS)
 
-        objsM = np.array([[o for o in p.objs] for p in parents])
+        objsM = np.array([[o for o in p.objs_lower] for p in parents])
         self.__globalL = objsM.min(0)
         self.__globalU = objsM.max(0)
 
@@ -588,9 +609,10 @@ class monise():
             solution (scalar): New solution to be added.
         """
         self.solutionsList.append(solution)
-        gap = self.currImp/self.__maxImp
-        logger.debug(str(len(self.solutionsList))+'th solution' +
-                     ' - importance: ' + str(gap))
+        self.__globalL = np.minimum(self.__globalL, solution.objs_lower)
+        #gap = self.currImp/self.__maxImp
+        #logger.debug(str(len(self.solutionsList))+'th solution' +
+        #             ' - importance: ' + str(gap))
 
     def _next(self) -> weight_solv:
         """Computes the next weighted solution.
@@ -616,8 +638,7 @@ class monise():
         """
         start = time.perf_counter()
         next_wsol = self.inicialization()
-        while (self.currImp / self.__maxImp > self.__targetGap and
-               len(self.solutionsList) < self.__targetSize):
+        while len(self.solutionsList) < self.__targetSize:
             solution = next_wsol.optimize(hotstart=self.hotstart)
             if next_wsol.best_solution_reached:
                 logger.info("Best solution found.")

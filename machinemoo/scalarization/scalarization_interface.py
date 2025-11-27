@@ -91,7 +91,7 @@ class scalar_interface(metaclass=ABCMeta):
         pass
 
 
-class w_interface(metaclass=ABCMeta):
+class w_interface(scalar_interface, metaclass=ABCMeta):
     """Abstract interface for scalarizations using weight vectors."""
     # - propertys
     @property
@@ -106,7 +106,7 @@ class w_interface(metaclass=ABCMeta):
         pass
 
 
-class single_interface(metaclass=ABCMeta):
+class single_interface(scalar_interface, metaclass=ABCMeta):
     """Abstract interface for single-objective optimization methods."""
     # - propertys
     @property
