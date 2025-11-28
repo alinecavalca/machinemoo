@@ -1,13 +1,15 @@
 import numpy as np
 import numpy.typing as npt
-from typing import Any
+from typing import Any, Tuple, Optional, Union
 from collections.abc import Callable
 from typing_extensions import Self
 
-from machinemoo import scalar_interface, single_interface, w_interface
+from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
+from machinemoo.moo.fix_weight import solve_optimal_w
 
 class Scalarization(w_interface, single_interface, scalar_interface):
-    """Base class for scalarization strategies in multi-objective optimization.
+    """
+    Base class for scalarization strategies in multi-objective optimization.
 
     This class defines a generic interface for performing scalarization using a 
     weight vector. It serves as a base for scalarization methods that learn models 
@@ -20,109 +22,106 @@ class Scalarization(w_interface, single_interface, scalar_interface):
             *args: Any, 
             **kwargs: Any
         ) -> None:
-        """Initializes the scalarization state.
+        """
+        Initializes the scalarization state.
 
         Args:
             num_objs (int): Number of objectives in the optimization problem.
+            lower_bound_estimate (str | float): Strategy for lower bound estimation.
+                                                Options: "zero", "lipschitz", or a float factor.
         """
-        self.__M: int = num_objs
-        self.__x: Any = None
-        self.__gradient = None
-        self.__w: np.float64 = np.zeros(num_objs)
-        self.__objs: npt.NDArray[np.float64] = np.zeros( num_objs)
+        self._M: int = num_objs
+        self._x: Any = None
+        self._gradient: Optional[npt.NDArray[np.float64]] = None
+        self._w: npt.NDArray[np.float64] = np.zeros(num_objs)
+        self._objs: npt.NDArray[np.float64] = np.zeros(num_objs)
+        
         self.lower_bound_estimate = lower_bound_estimate
-        self.__objs_lower = None
-        #self.model: Any = None
+        self._objs_lb: Optional[npt.NDArray[np.float64]] = None
+        
+        # Lipschitz constants vector (to be set by subclasses or mixins)
+        self.L: Optional[npt.NDArray[np.float64]] = None 
 
     @property
     def M(self) -> int:
-        """Returns the number of objectives.
-
-        Returns:
-            int: Number of objectives.
-        """
-        return self.__M
+        """Returns the number of objectives."""
+        return self._M
 
     @property
     def feasible(self) -> bool:
-        """Indicates whether the current solution is feasible.
-
-        Returns:
-            bool: Always True for this base implementation.
-        """
+        """Indicates whether the current solution is feasible."""
         return True
 
     @property
     def optimum(self) -> bool:
-        """Indicates whether the optimal solution has been reached.
-
-        Returns:
-            bool: Always True for this base implementation.
-        """
+        """Indicates whether the optimal solution has been reached."""
         return True
 
     @property
     def objs(self) -> npt.NDArray[np.float64]:
-        """Returns the objective vector of the solutions.
-
-        Returns:
-            np.ndarray: Objective values for each objective function.
+        """Returns the objective vector of the solutions."""
+        return self._objs
+    
+    def objective(self) -> npt.NDArray[np.float64]:
         """
-        return self.__objs
+        Returns the computed objective values.
+        Implementation of the abstract method from single_interface.
+        """
+        return self.objs
 
-    def _compute_lipschitz(self):
-        raise NotImplementedError("Subclass must implement Lipschitz calculation")
+    def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
+        """
+        Computes the Lipschitz-based lower bound estimate.
+        Must be implemented by subclasses or provided via Mixins.
+        """
+        raise NotImplementedError("Subclass must implement Lipschitz calculation or use a Mixin.")
     
     @property
-    def objs_lower(self) -> npt.NDArray[np.float64]:
-        """Returns a lower estimative of the objective values.
+    def objs_lb(self) -> npt.NDArray[np.float64]:
+        """
+        Returns a lower estimate of the objective values.
+        
+        Uses the strategy defined by `lower_bound_estimate`.
         
         Returns:
-            np.ndarray: Lower estimative for each objective function.
+            np.ndarray: Lower estimate for each objective function.
         """
-        if self.__objs_lower is not None:
-            return self.__objs_lower
+        if self._objs_lb is not None:
+            return self._objs_lb
 
         if self.lower_bound_estimate == "lipschitz":
-            self.__objs_lower = self._compute_lipschitz()
+            self._objs_lb = self._compute_lipschitz()
         elif self.lower_bound_estimate == "zero":
-            self.__objs_lower = np.zeros(self.__M)
+            self._objs_lb = np.zeros(self._M)
         else:
-            self.__objs_lower = self.objs - self.lower_bound_estimate * abs(self.objs)
-        return self.__objs_lower
+            # Assume it's a float factor
+            factor = float(self.lower_bound_estimate)
+            # Use NumPy multiply to ensure scalar-array multiplication is type-checked correctly
+            self._objs_lb = np.asarray(self.objs, dtype=np.float64) - np.multiply(factor, np.abs(self.objs))
+            
+        return self._objs_lb
 
     @property
     def x(self) -> Any:
-        """Returns the learned model or decision variables.
-
-        Returns:
-            Any: Learned model or solution representation.
-        """
-        return self.__x
+        """Returns the learned model or decision variables."""
+        return self._x
 
     @property
     def w(self) -> npt.NDArray[np.float64]:
-        """Returns the weight vector used in scalarization.
-
-        Returns:
-            np.ndarray: Scalarization weights.
-        """
-        return self.__w
+        """Returns the weight vector used in scalarization."""
+        return self._w
     
     @property
-    def gradient(self) -> Any | None:
-        """Returns the gradient of the scalarized objective, if available.
-
-        Returns:
-            Any or None: Gradient vector or None if not computed.
-        """
-        return self.__gradient
+    def gradient(self) -> Optional[npt.NDArray[np.float64]]:
+        """Returns the gradient of the scalarized objective, if available."""
+        return self._gradient
     
     def training(
         self,
         weight: npt.NDArray[np.float64]
-    ) -> tuple[Any, npt.NDArray[np.float64], Any] | tuple[Any, npt.NDArray[np.float64]]:
-        """Trains a model or solves the scalarized problem given a weight vector.
+    ) -> Union[Tuple[Any, npt.NDArray[np.float64]], Tuple[Any, npt.NDArray[np.float64], Any]]:
+        """
+        Trains a model or solves the scalarized problem given a weight vector.
 
         This method must be implemented by subclasses.
 
@@ -130,202 +129,209 @@ class Scalarization(w_interface, single_interface, scalar_interface):
             weight (np.ndarray): Weight vector for scalarization.
 
         Returns:
-            tuple: A tuple containing the trained model, objective values, and optionally the gradient.
-
-        Raises:
-            NotImplementedError: If not implemented in a subclass.
+            tuple: (trained_model, objective_values) OR (trained_model, objective_values, gradient)
         """
-        raise NotImplementedError
-    #training: Callable[..., Any] = training #may needed to fix mypy error
+        raise NotImplementedError("Subclasses must implement the training method.")
 
-    def optimize(self, weight: int | npt.NDArray[np.float64]) -> Self:
-        """Performs scalarization optimization with a given weight vector.
-
-        The method trains a model or solves a problem with the specified weights,
-        storing the result as internal state.
+    def optimize(self, weight: Union[int, npt.NDArray[np.float64]]) -> Self:
+        """
+        Performs scalarization optimization with a given weight vector.
 
         Args:
-            weight (int | npt.NDArray[np.float64]): Weight index (for single-objective) or full weight vector.
+            weight (int | np.ndarray): Weight index (for single-objective) or full weight vector.
 
         Returns:
             Self: The scalarization instance with updated solution.
         """
-        if isinstance(weight, int):
-            self.__w = np.zeros(self.M)
-            self.__w[weight] = 1
+        # Handle weight input
+        if isinstance(weight, (int, np.integer)):
+            self._w = np.zeros(self.M)
+            self._w[int(weight)] = 1.0
         elif isinstance(weight, np.ndarray) and weight.ndim == 1 and weight.size == self.M:
-            self.__w = weight
+            self._w = weight.astype(np.float64)
+        elif isinstance(weight, list) and len(weight) == self.M:
+            self._w = np.array(weight, dtype=np.float64)
         else:
-            raise ValueError("w is in the wrong format")
+            raise ValueError(f"Weight must be an int index or an array of size M ({self.M}). Got: {weight}")
 
-        self.__objs_lower = None
-        result: tuple[Any, Any, Any | None] = self.training(self.__w)
+        # Reset bounds cache
+        self._objs_lb = None
+        
+        # Execute training
+        result = self.training(self._w)
 
         if len(result) == 2:
-            model, self.__objs = result
-            self.__gradient = None
+            model, objs = result
+            self._gradient = None
         elif len(result) == 3:
-            model, self.__objs, self.__gradient = result
+            model, objs, gradient = result
+            self._gradient = gradient
+            self._w = solve_optimal_w(self._gradient, self.L)
         else:
-            raise ValueError("training() must return a tuple of 2 or 3 elements")
+            raise ValueError("training() must return a tuple of 2 or 3 elements (model, objs, [gradient])")
 
-        self.__M = len(self.__objs)
-        self.__x = model
+        self._objs = np.array(objs)
+        self._x = model
+        
+        # Update M in case training changed dimensions (though unusual)
+        if len(self._objs) != self._M:
+            self._M = len(self._objs)
 
         return self
 
+
 class LipschitzTorchMixin:
-    """Mixin that provides a Lipschitz calculation using PyTorch."""
+    """Mixin that provides a Lipschitz calculation for PyTorch-based scalarizations."""
+
+    # Attributes expected to be provided by the host class (e.g. Scalarization)
+    gradient: Optional[npt.NDArray[np.float64]]  # gradient per objective or None
+    L: Optional[npt.NDArray[np.float64]]         # Lipschitz constants per objective
+    w: npt.NDArray[np.float64]                   # weight vector
+    objs: npt.NDArray[np.float64]                # current objectives
 
     def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
-        """Returns a lower estimative of the objective values with lipschitz estamation.
-
-        Returns:
-            np.ndarray: Lower estimative for each objective function.
         """
-        w_gradient = self.w@np.array([self.gradient[idx] for idx in range(self.M)])
-        objs_delta = 1/(2*self.w@self.L)*w_gradient@w_gradient
-        self.__objs_lower = self.objs - objs_delta
-        return self.__objs_lower
+        Returns a lower estimate of the objective values using Lipschitz constants.
+        
+        Assumes `self.gradient` is a list/array of gradients per objective, 
+        and `self.L` is an array of Lipschitz constants per objective.
+        """
+        if self.gradient is None or self.L is None:
+            # Fallback if data is missing
+            return self.objs
+
+        # Ensure gradient is array-like for calculation
+        grads = np.array(self.gradient) # shape (M, n_params) or similar
+        
+        # Weighted gradient (approximate gradient of scalarized loss)
+        # w_gradient = sum(w_i * grad_i)
+        w_gradient = self.w @ grads 
+        
+        # Weighted Lipschitz constant
+        w_L = self.w @ self.L
+        
+        # If weighted Lipschitz is effectively zero, return current objectives
+        if w_L <= 1e-9:
+            return self.objs
+
+        # Compute quadratic correction (scalar) and subtract from objectives
+        objs_delta = (1/w_L) * grads@w_gradient - (1/2)*(self.L/(w_L**2))*(w_gradient@w_gradient)
+        return np.asarray(self.objs, dtype=np.float64) - objs_delta
 
 class LipschitzRegLoghMixin:
-    """Mixin that provides a Lipschitz calculation using Logistic Regression from Scikit Learn."""
+    """Mixin that provides a Lipschitz calculation using Logistic Regression logic."""
+
+    # Attributes expected to be provided by the host class (e.g. Scalarization)
+    gradient: Optional[npt.NDArray[np.float64]]  # Jacobian-like per objective or None
+    L: Optional[npt.NDArray[np.float64]]         # Lipschitz constants per objective
+    w: npt.NDArray[np.float64]                   # weight vector
+    objs: npt.NDArray[np.float64]                # current objectives
 
     def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
-        """Returns a lower estimative of the objective values with lipschitz estamation.
-
-        Returns:
-            np.ndarray: Lower estimative for each objective function.
         """
-        J = np.array(self.gradient)
-        grad_w = self.w@J
-        L = self.w@self.L
-        objs_delta = 1/L*J@grad_w - 1/2*self.L/(L**2)*(grad_w@grad_w)
-        self.__objs_lower = self.objs - objs_delta
-        return self.__objs_lower
+        Returns a lower estimate of the objective values with Lipschitz estimation
+        specific to Logistic Regression (linear models).
+        """
+        if self.gradient is None or self.L is None:
+            return self.objs
 
-class MooScalarization(w_interface, single_interface, scalar_interface):
-    """Implements scalarization for machine learning models using an external training function.
+        J = np.array(self.gradient) # Jacobian-like
+        grad_w = self.w @ J
+        L_scalar = self.w @ self.L
+        
+        if L_scalar == 0:
+            return self.objs
 
-    This class is designed to support model training guided by scalarization,
-    where a `train_fn` receives a model and a weight vector and returns objectives,
-    the updated model, and optionally gradients.
+        # Specific formula from the referenced logic
+        # Note: This logic assumes specific structure of gradient/L
+        objs_delta = (1/L_scalar) * (J @ grad_w) - (1/2) * (self.L / (L_scalar**2)) * (grad_w @ grad_w)
+        
+        return self.objs - objs_delta
+
+
+class MooScalarization(Scalarization):
+    """
+    Implements scalarization for generic machine learning models using an external training function.
+    
+    Can optionally support Lipschitz estimation if `lipschitz_constants` are provided.
     """
     def __init__(
         self,
-        model: object,
-        train_fn: Callable[[Any, npt.NDArray[np.float64]], tuple[npt.NDArray[np.float64], Any, Any | None]],
-        num_objs: int = 2
+        model: Any,
+        train_fn: Callable[
+            [Any, npt.NDArray[np.float64]],
+            Union[
+                Tuple[npt.NDArray[np.float64], Any],
+                Tuple[npt.NDArray[np.float64], Any, Optional[Any]]
+            ]
+        ],
+        num_objs: int = 2,
+        lipschitz_constants: Optional[npt.NDArray[np.float64]] = None,
+        **kwargs: Any
     ) -> None:
-        """Initializes the MooScalarization instance.
+        """
+        Initializes the MooScalarization instance.
 
         Args:
-            model (object): Initial machine learning model or structure to be optimized.
-            train_fn (Callable): A function that trains the model with a weight vector
-                and returns (objectives, updated model, [optional gradient]).
-            num_objs (int, optional): Number of objective functions. Defaults to 2.
+            model (Any): Initial machine learning model.
+            train_fn (Callable): Function: (model, weights) -> (objectives, updated_model, [gradient]).
+            num_objs (int): Number of objectives.
+            lipschitz_constants (np.ndarray, optional): Array of Lipschitz constants for the objectives. 
+                                                        Required if lower_bound_estimate="lipschitz".
         """
-        self.model: object = model
-        self.train: Callable[[Any, npt.NDArray[np.float64]], tuple[npt.NDArray[np.float64], Any, Any | None]] = train_fn
-        self.__M: int = num_objs
-        self.__objs: npt.NDArray[np.float64] = np.zeros(num_objs)
-        self.__x: object = None 
-        self.__w: npt.NDArray[np.float64] = np.zeros(num_objs)
-        self.__gradient = None
+        # Determine default estimation strategy based on provided constants
+        estimate_type = kwargs.pop("lower_bound_estimate", "lipschitz" if lipschitz_constants is not None else "zero")
 
-    @property
-    def M(self) -> int:
-        """Returns the number of objectives.
+        # Initialize base class with number of objectives and chosen lower-bound strategy
+        super().__init__(num_objs=num_objs, lower_bound_estimate=estimate_type, **kwargs)
 
-        Returns:
-            int: Number of objectives.
+        # Store model and training function
+        self.model = model
+        self.train_fn = train_fn
+
+        # Store Lipschitz constants if provided
+        self.L = np.array(lipschitz_constants, dtype=np.float64) if lipschitz_constants is not None else None
+
+    def training(self, weight: npt.NDArray[np.float64]) -> Union[Tuple[Any, npt.NDArray[np.float64]], Tuple[Any, npt.NDArray[np.float64], Optional[Any]]]:
         """
-        return self.__M
-
-    @property
-    def feasible(self) -> bool:
-        """Indicates whether the current solution is feasible.
-
-        Returns:
-            bool: Always True for this base implementation.
+        Delegates training to the provided `train_fn` and normalizes the returned tuple to
+        (model, objs) or (model, objs, gradient) as expected by Scalarization.optimize.
         """
-        return True
+        result = self.train_fn(self.model, weight)
 
-    @property
-    def optimum(self) -> bool:
-        """Indicates whether the optimal solution has been reached.
+        if not isinstance(result, (tuple, list)):
+            raise ValueError("train_fn must return a tuple: (objs, model) or (objs, model, gradient)")
 
-        Returns:
-            bool: Always True for this base implementation.
-        """
-        return True
-
-    @property
-    def objs(self) -> npt.NDArray[np.float64]:
-        """Returns the objective vector of the solutions.
-
-        Returns:
-            np.ndarray: Objective values for each objective function.
-        """
-        return self.__objs
-    
-    @property
-    def objs_lower(self) -> npt.NDArray[np.float64]:
-        """Returns a lower estimative of the objective values.
-        
-        Returns:
-            np.ndarray: Lower estimative for each objective function.
-        """
-        return self.__objs_lower
-
-    @property
-    def x(self) -> Any:
-        """Returns the learned model or decision variables.
-
-        Returns:
-            Any: Learned model or solution representation.
-        """
-        return self.__x
-
-    @property
-    def w(self) -> npt.NDArray[np.float64]:
-        """Returns the weight vector used in scalarization.
-
-        Returns:
-            np.ndarray: Scalarization weights.
-        """
-        return self.__w
-    
-    @property
-    def gradient(self) -> Any | None:
-        """Returns the gradient of the scalarized objective, if available.
-
-        Returns:
-            Any or None: Gradient vector or None if not computed.
-        """
-        return self.__gradient
-
-    def optimize(self, weight: int | npt.NDArray[np.float64]) -> Self:
-        """Performs optimization using the provided weight vector.
-
-        Trains the underlying model with the weight vector, stores the
-        objectives, model, and optionally gradient.
-
-        Args:
-            weight (int | npt.NDArray[np.float64]): Index of the objective (int) or a weight vector (np.ndarray).
-
-        Returns:
-            Self: The scalarization instance with updated model and objectives.
-        """
-        if isinstance(weight, int):
-            self.__w = np.zeros(self.M)
-            self.__w[weight] = 1
-        elif isinstance(weight, np.ndarray) and weight.ndim == 1 and weight.size == self.M:
-            self.__w = weight
+        if len(result) == 3:
+            objs, model, grad = result
+            objs_arr = np.asarray(objs, dtype=np.float64)
+            # update stored model reference with returned model
+            self.model = model
+            return model, objs_arr, grad
+        elif len(result) == 2:
+            objs, model = result
+            objs_arr = np.asarray(objs, dtype=np.float64)
+            self.model = model
+            return model, objs_arr
         else:
-            raise ValueError("w is in the wrong format")
+            raise ValueError("train_fn must return (objs, model) or (objs, model, gradient)")
 
-        self.__objs, self.model, self.__gradient = self.train(self.model, self.__w)
-        self.__x = self.model
+    def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
+        """
+        Generic Lipschitz estimation using the quadratic approximation (similar to TorchMixin).
+        """
+        if self.gradient is None or self.L is None:
+            return self.objs
 
-        return self
+        # We assume gradient is shaped correctly [M, n_params] or flattened compatible
+        grads = np.array(self.gradient)
+
+        # Weighted combination
+        w_gradient = self.w @ grads
+        w_L = self.w @ self.L
+
+        if w_L <= 1e-9:
+            return self.objs
+
+        objs_delta = (1.0 / (2.0 * w_L)) * np.dot(w_gradient, w_gradient)
+        return np.asarray(self.objs, dtype=np.float64) - objs_delta

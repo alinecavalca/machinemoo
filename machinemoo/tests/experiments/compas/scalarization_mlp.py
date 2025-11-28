@@ -8,7 +8,7 @@ from sklearn.metrics import log_loss
 from numpy.typing import ArrayLike
 
 from machinemoo import get_logger
-from machinemoo.scalarization.moo_scalarization import Scalarization
+from machinemoo.scalarization.old_moo_scalarization import Scalarization
 from machinemoo import calculate_torch_lipschitz_constant
 from machinemoo.utils.typing import MatrixLike
 

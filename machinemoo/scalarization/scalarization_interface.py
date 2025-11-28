@@ -68,6 +68,17 @@ class scalar_interface(metaclass=ABCMeta):
 
     @property
     @abstractmethod
+    def objs_lb(self) -> npt.NDArray[np.float64]:
+        """
+        Abstract property to get the objectives lower bound of the problem.
+        
+        Returns:
+            np.ndarray: Objective values for each objective function.
+        """
+        pass
+
+    @property
+    @abstractmethod
     def x(self) -> Any:
         """
         Abstract property to get the decision variables of the problem.
@@ -120,7 +131,8 @@ class single_interface(scalar_interface, metaclass=ABCMeta):
         """
         pass
 
-    def objetive(self) -> npt.NDArray[np.float64]:
+    @abstractmethod
+    def objective(self) -> npt.NDArray[np.float64]:
         """
         Abstract method to define the objective to be optimized.
         

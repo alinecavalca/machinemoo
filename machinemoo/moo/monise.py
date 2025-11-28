@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Many Objective Noninferior Estimation
+Many Objective Noninferior Estimation (MONISE)
 
 Author: Marcos M. Raimundo <marcosmrai@gmail.com>
         Laboratory of Bioinformatics and Bioinspired Computing
@@ -12,639 +12,436 @@ Reference:
     2017
     arXiv
 """
-# License: BSD 3 clause
-try:
-    import gurobipy as gp
-    from gurobipy import GRB
-    import mip
-    # Parâmetros para silenciar o Gurobi
-    params = {
-        "LogToConsole": 0,
-        # "OutputFlag": 0 # Outro sinônimo para o mesmo parâmetro
-    }
 
-    # Crie o ambiente com os parâmetros
-    try:
-        # AVISO: A licença WLS (acadêmica) pode ignorar o LogToConsole
-        # para a mensagem de licença.
-        env = gp.Env(empty=True, params=params) 
-        env.start()
-    except gp.GurobiError as e:
-        print(f"Erro no Gurobi: {e}")
-except ImportError:
-    import mip
 import copy
-import time
-import logging
 import numpy as np
 import numpy.typing as npt
+from typing import Any, List, Optional, cast
+from numbers import Real
 
+try:
+    import gurobipy as gp
+    import mip
+    # Parameters to silence Gurobi
+    params = {
+        "LogToConsole": 0,
+    }
+    try:
+        env = gp.Env(empty=True, params=params)
+        env.start()
+    except gp.GurobiError as e:
+        print(f"Gurobi Error: {e}")
+except ImportError:
+    import mip
+
+from machinemoo.core.base_algorithm import BaseMOO
 from machinemoo.utils.typing import scalar
-from machinemoo.utils.logging_config import get_logger
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
 
-
-
 __all__ = [
-    "monise"
+    "Monise"
 ]
 
-logger = get_logger(f"moo.{__name__}")
-
-#MAXINT = 200000000000000
+# Large integer for MILP constraints
 MAXINT = 2000000000
 
-class weight_solv():
-    """Solves a scalarization weight optimization problem for multi-objective learning.
+class WeightNode:
+    """
+    Solves a scalarization weight optimization problem for multi-objective learning.
     
-    This class estimates a new weighting vector based on an existing
-    list of scalarized solutions.
+    This class uses Mixed-Integer Linear Programming (MILP) to estimate a new 
+    weighting vector that maximizes the improvement in the Pareto front approximation.
     """
     def __init__(
         self,
-        solutionsList: list[scalar],
-        globalL: npt.NDArray[np.float64],
-        globalU: npt.NDArray[np.float64],
-        weightedScalar: scalar,
-        goal: float = float('inf'),
+        solutions: List[scalar],
+        global_lower: npt.NDArray[np.float64],
+        global_upper: npt.NDArray[np.float64],
+        weighted_scalar: scalar,
         time_limit: float = 10.0,
         mip_gap: float = 0.01, 
-        norm: bool = False
     ) -> None:
-        """Initialize the weight solver for multi-objective optimization.
-
-        Args:
-            solutionsList (list[scalar]): 
-                List of scalarized solutions representing the current approximation of the Pareto frontier.
-            globalL (npt.NDArray[np.float64]): 
-                Lower bounds for each objective (typically the utopia point).
-            globalU (npt.NDArray[np.float64]): 
-                Upper bounds for each objective (typically the nadir point).
-            weightedScalar (scalar): 
-                Scalarization object used to optimize with the new weight vector.
-            goal (float): 
-                Target importance value to reach. Defaults to infinity.
-            time_limit (float): 
-                Maximum time (in seconds) allowed for solving the internal optimization problem. Defaults to 10.0.
-            mip_gap (float): 
-                Acceptable optimality gap for solving the internal mixed-integer programming problem. Defaults to 0.01.
-            norm (bool): 
-                Whether to normalize the objective space based on `globalL` and `globalU`. Defaults to False.
         """
-        self.__weightedScalar = weightedScalar
-        self.__M = solutionsList[0].M
-        self.__globalL, self.__globalU = globalL, globalU
-        self.solutionsList = solutionsList
-        self.__goal = goal
-        self.__time_limit = time_limit
-        self.__mip_gap = mip_gap
-        self.__norm = norm
+        Args:
+            solutions (List[scalar]): Current Pareto front approximation.
+            global_lower (np.ndarray): Utopia point (lower bounds).
+            global_upper (np.ndarray): Nadir point (upper bounds).
+            weighted_scalar (scalar): Scalarization prototype.
+            time_limit (float): Solver time limit.
+            mip_gap (float): Solver optimality gap.
+        """
+        self.weighted_scalar = weighted_scalar
+        self.solutions = solutions
+        self.M = solutions[0].M
+        self.global_lower = global_lower
+        self.global_upper = global_upper
+        self.time_limit = time_limit
+        self.mip_gap = mip_gap
+        
         self.best_solution_reached = False
-        if len(self.solutionsList) == self.M:
-            self.__calcFirstW()
+        self.importance: float = 0.0
+        self.w: Optional[npt.NDArray[np.float64]] = None
+        self._solution: Optional[scalar] = None
+
+        # Determine which calculation strategy to use
+        # If we only have the initial individual minima (M solutions), use simpler LP
+        if len(self.solutions) == self.M:
+            self._calc_first_w()
         else:
-            self.__calcW(goal=goal)
+            self._calc_w()
 
-    @property
-    def M(self) -> int:
-        """Number of objective functions.
-
-        Returns:
-            int: The number of objectives.
+    def optimize(self) -> scalar:
         """
-        return self.__M
-
-    @property
-    def importance(self) -> float:
-        """Importance score computed from the separation margin optimization.
-
-        Returns:
-            float: The separation margin between upper and lower bounds.
+        Optimizes using the calculated weight vector.
+        Uses the best existing solution (based on the new weight) as a warm start.
         """
-        return self.__importance
+        if self.w is None:
+            raise RuntimeError("Weight vector 'w' is not set; cannot optimize.")
 
-    @property
-    def solution(self) -> scalar:
-        """The current optimized solution.
-
-        Returns:
-            scalar: The best solution found using the computed weights.
-        """
-        return self.__solution
-
-    @property
-    def w(self) -> npt.NDArray[np.float64]:
-        """The weight vector obtained from the MILP optimization.
-
-        Returns:
-            np.ndarray: The vector of weights for scalarization.
-        """
-        return self.__w
-
-    def optimize(self, hotstart: list[scalar] = []) -> scalar:
-        """Optimize using the weighted scalar method.
-
-        Args:
-            hotstart (list[scalar]): Initial solution.
-
-        Returns:
-            scalar: Optimized solution for this weight vector.
-        """
-        best_solution = np.zeros(self.M)
+        best_solution = None
         best_objective = np.inf
 
-        for solution in self.solutionsList:
-            aux = self.w@solution.objs
-            if aux < best_objective:
-                best_objective = aux
+        # Find warm start
+        for solution in self.solutions:
+            # Calculate weighted sum using current w
+            val = float(self.w @ solution.objs)
+            if val < best_objective:
+                best_objective = val
                 best_solution = solution
 
-        self.__solution = copy.copy(best_solution)
-        self.__solution.optimize(self.w)
-        self.ml_model = self.__solution.x
-        if np.all(np.equal(self.__solution.objs, best_solution.objs)):
-           self.best_solution_reached = True
-        return self.__solution
-
-    def __normf(self, obj: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Normalize the objectives
-
-        Args:
-            objs (np.ndarray): Objective vector to be normalized
+        self._solution = copy.copy(self.weighted_scalar)
+        self._solution.optimize(self.w)
         
-        Returns:
-            np.ndarray: Normalized objective vector
+        # Convergence check: if the "new" solution is identical to the warm start
+        if best_solution is not None and np.all(np.isclose(self._solution.objs, best_solution.objs)):
+            self.best_solution_reached = True
+            
+        return self._solution
+
+    def _calc_first_w(self) -> None:
         """
-        if self.__norm:
-            return (obj-self.__globalL)/(self.__globalU-self.__globalL)
-        else:
-            return (obj-self.__globalL)
-
-    def __normw(self, w: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Normalize the weights
-
-        Args:
-            w (np.ndarray): Weighting vector, ponderates the objectives of the
-                            weighted sum method.
-
-        Returns:
-            np.ndarray: Normalized weighting vector if normalization is True
-        """
-        if self.__norm:
-            w_ = w*(self.__globalU-self.__globalL)
-            return w_/w_.sum()
-        else:
-            return w
-
-    def __calcD(
-        self,
-        solT: scalar,
-        solList: list[scalar] | None = None
-    ) -> tuple[float, list[float]]:
-        """Compute the maximum normalized objective-wise distance between the
-        target solution and a list of reference solutions.
-
-        Args:
-            solT (scalar): The target solution to compare against.
-            solList (list[scalar], optional): List of solutions for comparison.
-                If None, defaults to `self.solutionsList`.
-
-        Returns:
-            tuple[float, list[float]]: A tuple containing:
-                - The maximum distance (float) between `solT` and the list.
-                - A list of individual distances (list[float]) for each solution.
-        """
-        if solList is None:
-            solList = self.solutionsList
-
-        vec = [max(self.__normf(solT.objs)-self.__normf(sol.objs))
-               for sol in solList]
-        value = max(vec)
-
-        return value, vec
-
-    def __calcFirstW(
-        self,
-        goal: float = 1.0,
-        eps: float = 0.00
-    ) -> None:
-        """Solve a linear optimization problem to compute the first weight
-        vector (w) based on individual objective-optimal solutions.
-        Assumes that the number of solutions is equal to the number of objectives.
-
-        Args:
-            goal (float): A target value for the objective. Default is 1.0.
-            eps (float): Tolerance value for constraint relaxation. Default is 0.00.
-
-        Raises:
-            Exception: If the solver fails to find a feasible solution.
+        Solve linear optimization for the initial weight vector.
+        Used when only individual minima are present.
         """
         oidx = [i for i in range(self.M)]
-        Nsols = len(self.solutionsList)
-        assert self.M == Nsols, 'only fist W'
-
-        # Create a gurobi model
-        #prob = lp.LpProblem("max mean", lp.LpMaximize)
+        
+        # Setup MIP model
         try:
             prob = mip.Model(sense=mip.MAXIMIZE, solver_name=mip.GRB) 
-        except:
+        except Exception:
             prob = mip.Model(sense=mip.MAXIMIZE)
-
         prob.verbose = 0
-
-        # Creation of linear integer variables
-        #w = list(lp.LpVariable.dicts('w', oidx, lowBound=0, upBound=1,
-        #                             cat='Continuous').values())
-        w = [prob.add_var(name='w', var_type=mip.CONTINUOUS, lb=0, ub=1) for i in oidx]
+        # Variables
+        w = [prob.add_var(name='w', var_type=mip.CONTINUOUS, lb=cast(Real, 0.0), ub=cast(Real, 1.0)) for _ in oidx]
+        v = prob.add_var(name='v', var_type=mip.CONTINUOUS)
+        v = prob.add_var(name='v', var_type=mip.CONTINUOUS)
         
-        uR = self.__globalL
+        # Utopia point (normalized)
+        # uR is effectively 0 vector in normalized space if global_lower is accurate
+        # But we calculate it explicitly to be safe
+        uR_norm = self.global_lower
 
-        #v = lp.LpVariable('v', cat='Continuous')
-        v = prob.add_var(name='v', var_type=mip.CONTINUOUS) 
-
-        for conN, sols in enumerate(self.solutionsList):
-            d, dvec = self.__calcD(sols)
-            #expr = v-lp.lpDot(w, self.__normf(sols.objs))
-            expr = v-mip.xsum(w[i]*self.__normf(sols.objs_lower)[i] for i in oidx)
-            prob += expr <= 0 #manter
-
-        for i in oidx:
-            prob += w[i] >= 0 #manter
-
-        #prob += lp.lpSum([w[i] for i in oidx]) == 1
-        prob += mip.xsum(w[i] for i in oidx) == 1
-        #prob += v-lp.lpDot(w, self.__normf(uR))
-        prob += v-mip.xsum(w[i]*self.__normf(uR)[i] for i in oidx)
-
-        #try:
-        #    grbs = lp.GUROBI(msg=False, OutputFlag=False)
-        #    prob.solve(grbs)
-        #except:
-        #prob.solve()
+        for sols in self.solutions:
+            # Use objs_lb for robust lower bound estimation logic
+            # If not available, fallback to objs via property
+            objs_norm = sols.objs_lb
             
-        status = prob.optimize()
+            expr = v - mip.xsum(w[i] * objs_norm[i] for i in oidx)
+            prob += expr <= cast(Real, 0.0)
 
-        #feasible = False if prob.status in [-1, -2] else True
-        feasible = status == mip.OptimizationStatus.OPTIMAL or status == mip.OptimizationStatus.FEASIBLE
+        # Sum of weights = 1
+        prob += mip.xsum(w[i] for i in oidx) == 1
+        
+        # Distance to Utopia
+        # v - w @ uR
+        prob += v - mip.xsum(w[i] * uR_norm[i] for i in oidx)
+
+        status = prob.optimize()
+        feasible = status in [mip.OptimizationStatus.OPTIMAL, mip.OptimizationStatus.FEASIBLE]
 
         if feasible:
-            #w_ = np.array([lp.value(w[i]) if lp.value(w[i]) >= 0 else 0
-            #               for i in oidx])
-            w_ = np.array([w[i].x if w[i].x >= 0 else 0 for i in oidx])
-            if self.__norm:
-                w_ = w_/(self.__globalU-self.__globalL)
-            #fobj = lp.value(prob.objective)
-            fobj = prob.objective_value
-            self.__w = np.array(w_)
-            self.__importance = fobj
+            w_val = np.array([var.x if var.x >= cast(Real, 0.0) else 0 for var in w])
+                
+            self.w = w_val / w_val.sum()
+                
+            obj_val = prob.objective_value
+            self.importance = float(obj_val) if obj_val is not None else 0.0
         else:
-            raise('Somethig wrong')
+            # Fallback
+            self.w = np.ones(self.M) / self.M
+            self.importance = 0.0
 
-    def __calcW(self,
-        goal: float = 1.0,
-        eps: float = 0.00
-    ) -> None:
-        """ Solve a mixed-integer linear program (MILP) to compute an updated
-        weighting vector (w) based on the current list of solutions. 
-
-        Args:
-            goal (float): A target value for the objective. Default is 1.0.
-            eps (float): Constraint relaxation tolerance. Default is 0.00.
-
-        Raises:
-            Exception: If no feasible solution is found during optimization.
+    def _calc_w(self, eps: float = 0.00) -> None:
+        """
+        Solve MILP to find the next optimal weight vector.
         """
         oidx = [i for i in range(self.M)]
-        Nsols = len(self.solutionsList)
-        # Create a gurobi model
-        #prob = lp.LpProblem("max mean", lp.LpMaximize)
+        n_sols = len(self.solutions)
+
         try:
             prob = mip.Model(sense=mip.MAXIMIZE, solver_name=mip.GRB) 
-        except:
+        except Exception:
             prob = mip.Model(sense=mip.MAXIMIZE)
-            
         prob.verbose = 0
 
-        # Creation of linear integer variables
-        w =  [ prob.add_var(name='w', lb=0, var_type=mip.CONTINUOUS) for i in oidx ]
-        uR = [ prob.add_var(name='uR', lb=-np.inf, var_type=mip.CONTINUOUS) for i in oidx ]
-        kp = [ prob.add_var(name='kp', lb=0, var_type=mip.CONTINUOUS) for i in range(Nsols) ]
-        nu = [ prob.add_var(name='nu', lb=0, var_type=mip.CONTINUOUS) for i in oidx ]
+        # Variables
+        w = [prob.add_var(name='w', lb=cast(Real, 0.0), var_type=mip.CONTINUOUS) for _ in oidx]
+        uR = [prob.add_var(name='uR', lb=cast(Real, -np.inf), var_type=mip.CONTINUOUS) for _ in oidx]
+        kp = [prob.add_var(name='kp', lb=cast(Real, 0.0), var_type=mip.CONTINUOUS) for _ in range(n_sols)]
+        nu = [prob.add_var(name='nu', lb=cast(Real, 0.0), var_type=mip.CONTINUOUS) for _ in oidx]
+        
+        kpB = [prob.add_var(name='kpB', var_type=mip.BINARY) for _ in range(n_sols)]
+        nuB = [prob.add_var(name='nuB', var_type=mip.BINARY) for _ in oidx]
 
-        kpB = [ prob.add_var(name='kpB', var_type=mip.BINARY) for i in range(Nsols) ]
-        nuB = [ prob.add_var(name='nuB', var_type=mip.BINARY) for i in oidx ]
+        v = prob.add_var(name='v', lb=cast(Real, 0.0), var_type=mip.CONTINUOUS)
+        mu = prob.add_var(name='mu', lb=cast(Real, -np.inf), var_type=mip.CONTINUOUS)
 
-        v = prob.add_var(name='v', lb=0, var_type=mip.CONTINUOUS)
-        mu = prob.add_var(name='mu', lb=-np.inf, var_type=mip.CONTINUOUS)
+        # Pre-calculate normalized values to keep loop clean
+        norm_w_list = []
+        for idx, s in enumerate(self.solutions):
+            # Try to obtain a weight vector from the solution; if unavailable or ill-typed, fall back.
+            w_val = getattr(s, "w", None)
+            if w_val is None:
+                # If this is one of the individual minima, prefer a unit vector for that objective index
+                if idx < self.M:
+                    w_val = np.zeros(self.M, dtype=float)
+                    w_val[idx] = 1.0
+                else:
+                    # Default to uniform weights
+                    w_val = np.ones(self.M, dtype=float) / float(self.M)
+            else:
+                # Ensure it's a float ndarray of the correct shape
+                try:
+                    w_val = np.asarray(w_val, dtype=float)
+                    if w_val.ndim == 0:
+                        w_val = np.ones(self.M, dtype=float) / float(self.M)
+                    elif w_val.size != self.M:
+                        w_val = w_val.reshape(self.M)
+                except Exception:
+                    w_val = np.ones(self.M, dtype=float) / float(self.M)
+            norm_w_list.append(w_val)
+        
+        # Use objs_lb (Lipschitz) if available for tighter bounds
+        norm_objs_list = [
+            s.objs_lb
+            for s in self.solutions
+        ]
+        
+        # 1. Constraints on uR (Hyperplane approximations)
+        for idx_sol, sols in enumerate(self.solutions):
+            # w_sol @ uR >= w_sol @ objs_sol
+            expr = mip.xsum(norm_w_list[idx_sol][i] * uR[i] for i in oidx)
+            cons = norm_w_list[idx_sol] @ norm_objs_list[idx_sol]
+            prob += expr >= cons * (1 - eps)
 
-        # Inherent constraints of this problem
-        for value, sols in enumerate(self.solutionsList):
-            expr = mip.xsum(self.__normw(sols.w)[i]*uR[i] for i in oidx)
-            cons = self.__normw(sols.w) @ self.__normf(sols.objs_lower)#self.__normf(sols.objs_lower)
-            prob += expr >= cons*(1-eps)
-
+        # 2. Definition of uR based on active constraints (KKT-like logic)
         for i in oidx:
-            expr = uR[i]-mip.xsum([kp[conN]*self.__normf(sols.objs)[i]
-                                   for conN, sols in
-                                   enumerate(self.solutionsList)])-nu[i]+mu
+            expr = uR[i] - mip.xsum(kp[k] * norm_objs_list[k][i] for k in range(n_sols)) - nu[i] + mu
             prob += expr == 0
 
+        # 3. uR must be >= global lower bound (Utopia)
+        norm_global_l = self.global_lower
         for i in oidx:
-            prob += uR[i] >= self.__normf(self.__globalL)[i] #mantem
+            prob += uR[i] >= norm_global_l[i]
 
-        bigC = max(self.__normf(self.__globalU))
+        # Big-M constant
+        norm_global_u = self.global_upper
+        big_c = np.max(norm_global_u) if len(norm_global_u) > 0 else 100.0
 
-        for conN, sols in enumerate(self.solutionsList):
-            expr = mip.xsum(w[i]*self.__normf(sols.objs)[i] for i in oidx)-v
-            prob += expr >= 0 #mantem
-            prob += expr <= kpB[conN]*bigC #mantem
-            prob += kp[conN] >= 0 #mantem
-            prob += kp[conN] <= (1-kpB[conN]) #mantem
+        # 4. Selection constraints (only one region active)
+        for k in range(n_sols):
+            # w @ objs_k - v >= 0
+            expr = mip.xsum(w[i] * norm_objs_list[k][i] for i in oidx) - v
+            prob += expr >= cast(Real, 0.0)
+            prob += expr <= kpB[k] * cast(Real, big_c)
+            prob += kp[k] >= cast(Real, 0.0)
+            # avoid subtracting a Var from a scalar (some solvers/types don't support it)
+            # enforce kp[k] + kpB[k] <= 1 instead of kp[k] <= 1 - kpB[k]
+            prob += kp[k] + kpB[k] <= cast(Real, 1)
 
+        # Simplex constraint
         prob += mip.xsum(w[i] for i in oidx) == 1
-        prob += mip.xsum(kp[i] for i in range(Nsols)) == 1
+        prob += mip.xsum(kp[k] for k in range(n_sols)) == 1
 
+        # 5. Dual constraints
         for i in oidx:
-            prob += w[i] >= 0 #mantem
-            prob += w[i] <= nuB[i] #mantem
-            prob += nu[i] >= 0 #mantem
-            prob += nu[i] <= (1-nuB[i])*2*bigC #mantem
+            prob += w[i] >= cast(Real, 0.0)
+            prob += w[i] <= nuB[i]
+            prob += nu[i] >= cast(Real, 0.0)
+            # Avoid direct subtraction between literal and Var (some solvers/types don't support it).
+            # Rewrite nu[i] <= (1 - nuB[i]) * 2 * big_c as nu[i] + 2*big_c*nuB[i] <= 2*big_c
+            prob += mip.xsum([nu[i], cast(Real, 2 * big_c) * nuB[i]]) <= cast(Real, 2 * big_c)
         
         prob += mip.xsum([mu])
-
-        # desigualdades válidas
         prob += mu <= v
 
-        rnd = np.array(sorted([0] +
-                              [np.random.rand() for i in range(self.M-1)]
-                              + [1]))
-        w_ini = np.array([rnd[i+1]-rnd[i] for i in range(self.__M)])
-        w_ini = w_ini/w_ini.sum()
-        prob.start = [(wi, wii) for wi, wii in zip(w, w_ini)]
+        # Warm start
+        rnd = np.array(sorted([0] + [np.random.rand() for _ in range(self.M - 1)] + [1]))
+        w_ini = np.array([rnd[i+1] - rnd[i] for i in range(self.M)])
+        w_ini = w_ini / w_ini.sum()
+        prob.start = [(w[i], w_ini[i]) for i in range(self.M)]
 
-        #grbs = lp.GUROBI(epgap=self.__mip_gap, SolutionLimit=1,
-        #                         msg=False, OutputFlag=False, Threads=1)
-
-        prob.max_gap = self.__mip_gap
+        # Solver config
         prob.threads = 1
         prob.max_solutions = MAXINT
-        prob.max_seconds = self.__time_limit
+        prob.max_seconds = self.time_limit
 
-        #if self.__goal != float('inf'):
-            #grbs = lp.GUROBI(timeLimit=self.__time_limit,
-            #                         epgap=self.__mip_gap,
-            #                         SolutionLimit=MAXINT,
-            #                         msg=False, BestObjStop=self.__goal,
-            #                         OutputFlag=False, Threads=1)
-
-
-        #else:
-            #grbs = lp.GUROBI(timeLimit=self.__time_limit,
-            #                         epgap=self.__mip_gap,
-            #                         SolutionLimit=MAXINT,
-            #                         msg=False, OutputFlag=False,
-            #                         Threads=1)
-
-        status = prob.optimize()#max_solutions=None
-            
-
-        #feasible = False if prob.status in [-1, -2] else True
-        feasible = status == mip.OptimizationStatus.OPTIMAL or status == mip.OptimizationStatus.FEASIBLE
-
+        status = prob.optimize()
+        feasible = status in [mip.OptimizationStatus.OPTIMAL, mip.OptimizationStatus.FEASIBLE]
         if feasible:
-            #w_ = np.array([lp.value(w[i]) if lp.value(w[i]) >= 0 else 0
-            #               for i in oidx])
-            w_ = np.array([w[i].x if w[i].x >= 0 else 0 for i in oidx])
-            w_ = w_/w_.sum()
-            if self.__norm:
-                w_ = w_/(self.__globalU-self.__globalL)
-            #fobj = lp.value(prob.objective)
-            fobj = prob.objective_value
-            self.__w = np.array(w_)
-            self.__importance = fobj
+            w_res = np.array([var.x if var.x >= cast(Real, 0.0) else 0 for var in w])                
+            if w_res.sum() > 0:
+                self.w = w_res / w_res.sum()
+            else:
+                self.w = np.ones(self.M) / self.M
+                
+            obj_val = prob.objective_value
+            self.importance = float(obj_val) if obj_val is not None else 0.0
         else:
-            raise('Non-feasible solution')
+            self.w = np.ones(self.M) / self.M
+            self.importance = 0.0
+            self.importance = 0.0
 
 
-class monise():
-    """MONISE: Many-Objective Non-Inferior Set Estimation.
+class Monise(BaseMOO):
+    """
+    MONISE: Many-Objective Non-Inferior Set Estimation.
     
-    This algorithm incrementally constructs a Pareto frontier approximation by solving a
-    sequence of weighted scalarization problems. It maintains and updates a candidate 
-    list based on weight importance, improving the frontier coverage over time.
+    Incrementally constructs a Pareto frontier approximation by solving a
+    sequence of weighted scalarization problems using MILP to find the next
+    most promising weight vector.
     """
     def __init__(
         self,
-        weightedScalar: scalar,
-        singleScalar: scalar,
-        targetGap: float = 0.0,
-        targetSize: int | None = None,
-        redFact: float = float('inf'),
-        smoothCount: int | None = None,
-        nodeTimeLimit: float = float('inf'),
-        nodeGap: float = 0.01,
-        hotstart: list[scalar] = [],
-        norm: bool = True
-        ) -> None:
-        """Initializes MONISE class
-
+        weighted_scalar: scalar,
+        single_scalar: scalar,
+        target_size: int = 20,
+        time_limit: float = float('inf'),   
+        node_time_limit: float = float('inf'),
+        node_gap: float = 0.01,
+        norm: bool = True,
+        hotstart: List[scalar] = [],
+        verbose: bool = False,
+        debug: bool = False,
+        **kwargs: Any
+    ) -> None:
+        """
         Args:
-            weightedScalar (scalar): An instance of a class solving the weighted scalarization
-            singleScalar (scalar): An instance of a class solving single-objective problems.
-            targetGap (float): Termination criterion based on importance ratio. Default is 0.0
-            targetSize (int): Desired number of Pareto solutions.
-                Defaults to 20 × number of objectives if not specified.
-            redFact (float): Reduction factor used in adaptive refinement. Default is infinity.
-            smoothCount (int): Number of smoothing iterations before stopping. Default is 0.
-            nodeTimeLimit (float): Maximum time allowed (in seconds) per node optimization.
-                Default is infinity.
-            nodeGap (float): Acceptable optimization gap for each node. Default is 0.01.
-            hotstart (list[scalar]): Initial solutions/models to warm-start the optimization.
-            norm (bool): Whether to normalize objective vectors before comparison. Default is True.
-
-        Raises:
-            ValueError: If the provided `weightedScalar` or `singleScalar` does not implement the 
-                expected scalarization interfaces.
+            weighted_scalar: Strategy for weighted sum.
+            single_scalar: Strategy for single objective.
+            target_size: Desired number of solutions.
+            time_limit: Overall time limit.
+            node_time_limit: Time limit per MILP solve.
+            node_gap: MIP gap for MILP solve.
+            norm: Normalize objectives.
+            hotstart: Initial solutions.
         """
-        self.__solutionsList = scalar_interface
-        self.__solutionsList = w_interface
-        if (not isinstance(weightedScalar, scalar_interface) or
-            not isinstance(weightedScalar, w_interface) or
-            not isinstance(singleScalar, scalar_interface) or
-                not isinstance(singleScalar, single_interface)):
-            raise ValueError('''weightedScalar and singleScalar must be a
-                             mo_problem implementation.''')
+        # Initialize BaseMOO
+        super().__init__(time_limit=time_limit, target_size=target_size, verbose=verbose, debug=debug)
 
-        self.__weightedScalar = weightedScalar
-        self.__singleScalar = singleScalar
-        self.__targetGap = targetGap
-        self.__targetSize = (targetSize if targetSize is not None else
-                             20*self.__weightedScalar.M)
-        self.__nodeTimeLimit = nodeTimeLimit
-        self.__nodeGap = nodeGap
-        self.__redFact = redFact
-        self.__norm = norm
-        if smoothCount is None:
-            self.__smoothCount = 1 if nodeTimeLimit == float('inf') else 5
-        else:
-            self.__smoothCount = smoothCount
+        if (not isinstance(weighted_scalar, (scalar_interface, w_interface)) or
+            not isinstance(single_scalar, (scalar_interface, single_interface))):
+            raise ValueError("Scalarizers must implement correct interfaces.")
 
-        self.__maxImp = 1
-        self.__hotstart = hotstart
-        self.__solutionsList = []
-        self.__candidatesList = []
-
-    def __del__(self) -> None:
-        """
-        Deletes the solutions list attribute from the object if it exists.
+        self.weighted_scalar = weighted_scalar
+        self.single_scalar = single_scalar
+        self.node_time_limit = node_time_limit
+        self.node_gap = node_gap
+        self.hotstart = hotstart
         
-        This is a cleanup method called when the object is about to be destroyed.
+        # State
+        self.M: int = 0
+        self.global_lower: Optional[npt.NDArray[np.float64]] = None
+        self.global_upper: Optional[npt.NDArray[np.float64]] = None
+        self.importances: List[float] = []
+        
+        # Used to hold the next node to process
+        self._next_node: Optional[WeightNode] = None
+
+    def initialize(self) -> None:
         """
-        if hasattr(self, '__solutionsList'):
-            del self.__solutionsList
-
-    @property
-    def targetSize(self) -> int:
-        """Target number of Pareto-optimal solutions.
-
-        Returns:
-            int: The number of solutions to aim for in the optimization process.
+        Finds individual minima, computes bounds, and creates the first WeightNode.
         """
-        return self.__targetSize
+        self.M = self.single_scalar.M
+        neig_o = []
+        
+        # 1. Find Individual Minima
+        for i in range(self.M):
+            single_s = copy.copy(self.single_scalar)
+            self.logger.debug(f"Finding {i+1}th individual minima")
+            
+            # Attempt hotstart if compatible (requires impl in scalarizer)
+            # Standard scalarize doesn't take hotstart in optimize() signature usually
+            single_s.optimize(i) 
+            
+            neig_o.append(single_s.objs)
+            # Add to BaseMOO lists (filtering logic applies)
+            self.update(None, single_s)
 
-    @property
-    def targetGap(self) -> float:
-        """Target minimum relative gap between solutions.
+        # 2. Compute Global Bounds
+        # Use objs_lb from history if available for tighter Utopia
+        objs_lb_matrix = np.array([
+            s.objs_lb for s in self.history_list
+        ])
+        
+        # Global Lower (Utopia): min of lower bounds
+        self.global_lower = objs_lb_matrix.min(axis=0)
+        
+        # Global Upper (Nadir): max of actual objectives (safer for normalization)
+        objs_matrix = np.array([s.objs for s in self.history_list])
+        self.global_upper = objs_matrix.max(axis=0)
 
-        Returns:
-            float: The convergence threshold used to stop refinement.
+        # 3. Create First Node
+        # Corresponds to finding the weight that maximizes distance to Utopia
+        # given the initial Extreme points.
+        first_node = WeightNode(
+            solutions=self.solutions_list,
+            global_lower=cast(npt.NDArray[np.float64], self.global_lower),
+            global_upper=cast(npt.NDArray[np.float64], self.global_upper),
+            weighted_scalar=self.weighted_scalar,
+        )
+        
+        self.importances = [first_node.importance]
+        
+        # Queue this node to be picked up by select()
+        self._next_node = first_node
+
+    def select(self) -> Optional[WeightNode]:
         """
-        return self.__targetGap
-
-    @property
-    def solutionsList(self) -> list[scalar]:
-        """List of current Pareto-optimal solutions.
-
-        Returns:
-            list[scalar]: An array containing objective values of the solutions.
+        Returns the next WeightNode to optimize.
+        Calculates the subsequent node for the *next* iteration before returning.
         """
-        return self.__solutionsList
+        # 1. Get the node prepared in previous step
+        current_node = self._next_node
+        
+        # 2. Prepare the *next* node for the future
+        # (This implements the iterative nature of Monise loop)
+        if current_node is not None:
+            # We construct the NEXT search direction based on current state
+            # This is slightly different from RandomWeights which is stateless.
+            # MONISE logic: Calculate weight for *next* iteration based on current solutions.
+            
+            new_node = WeightNode(
+                solutions=self.solutions_list,
+                global_lower=cast(npt.NDArray[np.float64], self.global_lower),
+                global_upper=cast(npt.NDArray[np.float64], self.global_upper),
+                weighted_scalar=self.weighted_scalar,
+                time_limit=self.node_time_limit,
+                mip_gap=self.node_gap,
+            )
+            self.importances.append(new_node.importance)
+            self._next_node = new_node
 
-    @property
-    def hotstart(self) -> list[scalar]: 
-        """Get the list of initial solutions (hotstart) for the optimization process.
+        return current_node
 
-        Returns:
-            list[scalar]: Combined list of warm-start solutions and previously found solutions.
+    def update(self, node: Any, solution: scalar) -> None:
         """
-        return self.__hotstart+self.solutionsList
-
-    @property
-    def currImp(self) -> float:
-        """Current importance score based on recent iterations.
-
-        Returns:
-            float: Maximum importance value from the last `smooth_count` iterations.
+        Updates solutions and global lower bound.
         """
-        return max(self.__importances[-self.__smoothCount:])
-
-    @property
-    def maxImp(self) -> float:
-        """Maximum importance value observed so far.
-
-        Returns:
-            float: The highest importance score recorded during optimization.
-        """
-        return self.__maxImp
-
-    @property
-    def importances(self) -> list[float]:
-        """List of all importance values computed during optimization.
-
-        Returns:
-            list[float]: Historical record of importance scores.
-        """
-        return self.__importances
-
-    def inicialization(self) -> weight_solv:
-        """Initializes the optimization process.
-
-        Finds the individual minima of each objective, computes the global lower 
-        and upper bounds, and builds the first weighted solution. This sets up 
-        the optimization for iterative refinement.
-
-        Returns:
-            weight_solv: The first weighted solution used to start the optimization.
-        """
-        self.__M = self.__singleScalar.M
-        parents = []
-        for i in range(self.__M):
-            singleS = copy.copy(self.__singleScalar)
-            logger.debug('Finding '+str(i+1)+'th individual minima')
-            try:
-                singleS.optimize(i, hotstart=self.hotstart)
-            except:
-                singleS.optimize(i)
-            self.__solutionsList.append(singleS)
-            parents.append(singleS)
-
-        objsM = np.array([[o for o in p.objs_lower] for p in parents])
-        self.__globalL = objsM.min(0)
-        self.__globalU = objsM.max(0)
-
-        first_wsol = weight_solv(parents, self.__globalL, self.__globalU,
-                                 self.__weightedScalar, norm=self.__norm)
-
-        self.__maxImp = first_wsol.importance
-        self.__importances = [first_wsol.importance]
-        self.__goal = self.__maxImp
-
-        return first_wsol
-
-    def update(self, node: weight_solv, solution: scalar) -> None:
-        """Updates the internal solution set with a new candidate.
-
-        Args:
-            node (weight_solv): The node that generated the solution.
-            solution (scalar): New solution to be added.
-        """
-        self.solutionsList.append(solution)
-        self.__globalL = np.minimum(self.__globalL, solution.objs_lower)
-        #gap = self.currImp/self.__maxImp
-        #logger.debug(str(len(self.solutionsList))+'th solution' +
-        #             ' - importance: ' + str(gap))
-
-    def _next(self) -> weight_solv:
-        """Computes the next weighted solution.
-
-        Returns:
-            weight_solv: The next weighted solution to be optimized.
-        """
-        next_wsol = weight_solv(self.solutionsList, self.__globalL,
-                                self.__globalU, self.__weightedScalar,
-                                goal=self.currImp * self.__redFact,
-                                time_limit=self.__nodeTimeLimit,
-                                mip_gap=self.__nodeGap, norm=self.__norm)
-        self.__importances += [next_wsol.importance]
-        return next_wsol
-
-    def optimize(self) -> None:
-        """Runs the full MONISE optimization process.
-
-        Initializes the algorithm, iteratively refines the solution set using
-        weighted scalarization, selecting new weight vectors, solving the 
-        scalarized problem, and updates the list of solutions until the stopping
-        criteria are met.
-        """
-        start = time.perf_counter()
-        next_wsol = self.inicialization()
-        while len(self.solutionsList) < self.__targetSize:
-            solution = next_wsol.optimize(hotstart=self.hotstart)
-            if next_wsol.best_solution_reached:
-                logger.info("Best solution found.")
-                break
-            self.update(next_wsol, solution)
-            next_wsol = self._next()
-
-        self.__fit_runtime = time.perf_counter() - start
-        logger.info(f"Fit runtime: {self.__fit_runtime:.2f} seconds")
+        # 1. BaseMOO update (history + filtering)
+        super().update(node, solution)
+        
+        # 2. Update Global Lower Bound (Lipschitz support)
+        # If the new solution has a lower estimated bound, expand the Utopia point
+        if self.global_lower is not None:
+            self.global_lower = np.minimum(self.global_lower, solution.objs_lb)
