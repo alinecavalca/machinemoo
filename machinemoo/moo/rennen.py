@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-A posteriori multiobjective optimization method based on
-polyhedral approximation and dummy points.
+Rennen: A posteriori multiobjective optimization method.
+
+Based on polyhedral approximation (Sandwich Algorithm) and dummy points.
 
 Author: Marcos M. Raimundo <marcosmrai@gmail.com>
         Laboratory of Bioinformatics and Bioinspired Computing
@@ -13,411 +14,442 @@ Reference:
     Gijs Rennen, Edwin R. van Dam, and Dick den Hertog
     INFORMS Journal on Computing 2011 23:4, 493-517
 """
-# License: BSD 3 clause
 
-import numpy as np
-import pulp as lp
 import copy
-import logging
-import time
+import numpy as np
+import numpy.typing as npt
+import pulp as lp
 from scipy.spatial import ConvexHull
+from typing import Any, List, Optional, Set, Dict, Tuple, cast
 
-from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, \
-                                    single_interface
+from machinemoo import get_logger
+from machinemoo.moo.core import MOOptimizer
+from machinemoo.utils.typing import scalar
+from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
 
 __all__ = [
-    "rennen"
+    "Rennen"
 ]
 
-logger = logging.getLogger(__name__)
-logger.setLevel(level=logging.DEBUG)
+logger = get_logger(f"moo.{__name__}")
 
-class weight_iter():
-    """Class to auxiliate the weight vector calculation and
-    scalarization solving.
-    Parameters
-    ----------
-    w : array_like, shape = [M,]
-        Weighting vector -- ponderates the objectives of
-        the weighted sum method.
-    solutionsList : list of scalar_interface classes.
-        Previously found solutions used here to calculate the importance of
-        the weight vector w.
-    globalL : array_like, shape = [M,]
-        Utopia point -- used to normalize the objectives.
-    globalU : array_like, shape = [M,]
-        Nadir or pseudo-Nadir point -- used to normalize the objectives.
-    weightedScalar : w_interface class
-        Class capable of solving the weighted sum method of the problem.
-    point : array_like, shape = [M,]
-        Facet point -- point belonging to the w facet.
-    norm : bolean
-        Parameter to indicate if the optimization is normalized by the extreme
-        points (utopia and (pseudo-)nadir) or not.
-    Attributes
-    ----------
-    w : array_like, shape = [M,]
-        Weighting vector -- ponderates the objectives of
-        the weighted sum method.
-    imporantance : float
-        Numerical value for how importante is this weighting vector for the
-        next iteration.
-    M : int
-        Number of objectives.
+# --- Helper Functions ---
+
+def convex_combination(points: List[npt.NDArray[np.float64]], point: npt.NDArray[np.float64]) -> bool:
     """
-    def __init__(self, w, solutionsList, globalL, globalU, weightedScalar,
-                 point, norm=True):
-        if not (isinstance(weightedScalar, scalar_interface) and
-                isinstance(weightedScalar, w_interface)):
-            raise ValueError(weightedScalar +
-                             ' and must be a mo_problem implementation.')
+    Calculates if a point is a convex combination of other points in the hull.
+    Used to avoid adding unnecessary points to the hull calculation.
+    """
+    n_points = len(points)
+    n_dim = len(point)
+    points_idx = list(range(n_points))
+    dim_idx = list(range(n_dim))
 
-        self.__weightedScalar = weightedScalar
-        self.__M = weightedScalar.M
-        self.__globalL, self.__globalU = globalL, globalU
-        self.__norm = norm
-        self.__uR = None
-        self.__calcW(w)
-        self.__point = point
-        self.calcImportance(solutionsList)
+    # Create LP problem
+    prob = lp.LpProblem("max_mean", lp.LpMinimize)
 
-    @property
-    def importance(self):
-        return self.__importance
+    # Variables: alpha coefficients for convex combination
+    alpha = lp.LpVariable.dicts('alpha', points_idx, lowBound=0, cat='Continuous')
 
-    @property
-    def w(self):
-        return self.__w
-
-    @property
-    def M(self):
-        return self.__M
-
-    def __normf(self, obj):
-        if self.__norm:
-            return (obj-self.__globalL)/(self.__globalU-self.__globalL)
-        else:
-            return (obj-self.__globalL)
-
-    def __normw(self, w):
-        if self.__norm:
-            w_ = w*(self.__globalU-self.__globalL)
-            return w_/w_.sum()
-        else:
-            return w
-
-    def optimize(self):
-        self.__solution = copy.copy(self.__weightedScalar)
-        self.__solution.optimize(self.w)
-        return self.__solution
-
-    def calcImportance(self, solutionsList):
-        '''If uR is already known test if it is yet feasible to avoid
-        unecessary LP calculations.
-        '''
-        if (self.__uR is not None and
-            all([self.__normw(sols.w) @ self.__uR >=
-                 self.__normf(sols.objs) @ self.__normw(sols.w)
-                 for sols in solutionsList])):
-            return
-        else:
-            self.__calcImportance(solutionsList)
-
-    def __calcImportance(self, solutionsList):
-        '''Calculates the importance of a weight using Equation 2 to find the
-        lower point and Proposition 4 of the referenced work
-        to calculate the importance.
-        '''
-        oidx = [i for i in range(self.M)]
-        prob = lp.LpProblem("Lower point", lp.LpMinimize)
-
-        uR = list(lp.LpVariable.dicts('uR', oidx, cat='Continuous').values())
-
-        for value, sols in enumerate(solutionsList):
-            expr = lp.lpDot(self.__normw(sols.w), uR)
-            cons = self.__normf(sols.objs) @ self.__normw(sols.w)
-            prob += expr >= cons
-
-        prob += lp.lpDot(self.__normw(self.w), uR)
-
-        grbs = lp.GUROBI(msg=False, OutputFlag=False, Threads=1)
-        if grbs.available():
-            prob.solve(grbs)
-        else:
-            cbcs = lp.PULP_CBC_CMD(threads=1)
-            prob.solve(cbcs, use_mps=False)
-
-        feasible = False if prob.status in [-1, -2] else True
-
-        self.__uR = np.array([lp.value(uR[i]) for i in oidx])
-
-        if feasible:
-            self.__importance = ((self.__normw(self.w) @ self.__point -
-                                 self.__normw(self.w) @ self.__uR) /
-                                 (self.__normw(sols.w) @ np.ones(self.M)))
-        else:
-            raise('Non-feasible solution')
-
-    def __calcW(self, w=None):
-        if w @ self.__normf(self.__globalL) < w @ self.__normf(self.__globalU):
-            w /= np.abs(w).sum()
-        else:
-            w /= -np.abs(w).sum()
-
-        if self.__norm:
-            w = w/(self.__globalU-self.__globalL)
-
-        self.__w = np.abs(w)
-
-
-def convexCombination(points, point):
-    '''Calculates if a point is a convex combination of another points in the
-    hull, this is done to avoid unecessary point in the hull calculation.
-    '''
-    points_idx = [i for i in range(len(points))]
-    dim_idx = [j for j in range(len(point))]
-    prob = lp.LpProblem("max mean", lp.LpMinimize)
-
-    alpha = list(lp.LpVariable.dicts('alpha', points_idx,
-                                     cat='Continuous').values())
-
+    # Constraints: sum(alpha * points) == point
     for j in dim_idx:
-        prob += (lp.lpSum([alpha[i]*points[i][j] for i in points_idx]) ==
-                 point[j])
+        prob += (lp.lpSum([alpha[i] * points[i][j] for i in points_idx]) == point[j])
 
+    # Constraint: sum(alpha) == 1 (Convex combination)
     prob += lp.lpSum([alpha[i] for i in points_idx]) == 1
 
+    # Special handling for exact duplicates to prevent trivial solutions
+    # If point matches points[i], force alpha[i] = 0 to check if it can be formed by OTHERS
+    # (Though logic in original code seems to check if it is *strictly* contained)
     for i in points_idx:
-        if all(points[i] == point):
+        if np.all(np.isclose(points[i], point)):
             prob += alpha[i] == 0
-        else:
-            prob += alpha[i] >= 0
 
-    grbs = lp.GUROBI(msg=False, OutputFlag=False, Threads=1)
-    if grbs.available():
-        prob.solve(grbs)
-    else:
-        cbcs = lp.PULP_CBC_CMD(threads=1)
-        prob.solve(cbcs, use_mps=False)
+    # Solve
+    # Suppress output
+    solver = lp.PULP_CBC_CMD(msg=False)
+    prob.solve(solver)
 
-    feasible = False if prob.status in [-1, -2] else True
+    # Feasible means it IS a convex combination
+    feasible = (prob.status not in [lp.LpStatusInfeasible, lp.LpStatusUnbounded])
     return feasible
 
 
-def alreadyFound(points, point):
-    return any([all(p == point) for p in points])
+def already_found(points: List[npt.NDArray[np.float64]], point: npt.NDArray[np.float64]) -> bool:
+    """Checks if a point already exists in the list."""
+    return any(np.all(np.isclose(p, point)) for p in points)
 
 
-class rennen():
-    """A posteriori multiobjective optimization method based on
-    polyhedral approximation and dummy points.
-    Parameters
-    ----------
-    weightedScalar : w_interface class
-        Class capable of solving the weighted sum method of the problem.
-    singleScalar : s_interface class
-        Class capable of solving the the problem for a single objective.
-    targetSize : int
-        Number of points of the representation.
-    norm : bolean
-        Parameter to indicate if the optimization is normalized by the extreme
-        points (utopia and (pseudo-)nadir) or not.
-    Attributes
-    ----------
-    solutionsList : list of scalar_interface classes.
-        Solutions that represent the Pareto-frontier.
-    targetSize : int
-        Number of points of the representation.
-    importances : list of floats
-        The importance of the found solutions.
+class WeightNode:
     """
-    def __init__(self, weightedScalar=None, singleScalar=None,
-                 targetSize=None,  norm=True, timeLimit=float('inf')):
-        self.__solutionsList = scalar_interface
-        self.__solutionsList = w_interface
-        if (not isinstance(weightedScalar, scalar_interface) or
-            not isinstance(weightedScalar, w_interface) or
-            not isinstance(singleScalar, scalar_interface) or
-                not isinstance(singleScalar, single_interface)):
-            raise ValueError("""weightedScalar and singleScalar
-                             must be a mo_problem implementation.""")
+    Helper class to calculate weight vectors and solve scalarizations for Rennen.
+    Represents a facet/candidate in the sandwich approximation.
+    """
+    def __init__(
+        self,
+        w: npt.NDArray[np.float64],
+        solutions_list: List[scalar],
+        global_lower: npt.NDArray[np.float64],
+        global_upper: npt.NDArray[np.float64],
+        weighted_scalar: scalar,
+        point: npt.NDArray[np.float64],
+        norm: bool = True
+    ) -> None:
+        self.weighted_scalar = weighted_scalar
+        self.M = weighted_scalar.M
+        self.global_lower = global_lower
+        self.global_upper = global_upper
+        self.norm = norm
+        self.target_point = point
+        
+        self.w: npt.NDArray[np.float64] = np.zeros(self.M)
+        self.importance: float = 0.0
+        self.uR: Optional[npt.NDArray[np.float64]] = None
+        self._solution: Optional[scalar] = None
+        self.best_solution_reached = False
 
-        self.__weightedScalar = weightedScalar
-        self.__singleScalar = singleScalar
-        self.__targetSize = (targetSize if targetSize is not None else
-                             20*self.__weightedScalar.M)
-        self.__norm = norm
-        self.__timeLimit = timeLimit
+        self._calc_w(w)
+        self.calc_importance(solutions_list)
 
-        self.__solutionsList = []
-        self.__candidatesList = {}
+    def optimize(self) -> scalar:
+        """Runs the optimization for this weight vector."""
+        self._solution = copy.copy(self.weighted_scalar)
+        self._solution.optimize(self.w)
+        return self._solution
 
-    def __del__(self):
-        if hasattr(self, '__solutionsList'):
-            del self.__solutionsList
-
-    @property
-    def M(self): return self.__singleScalar.M
-
-    @property
-    def targetSize(self): return self.__targetSize
-
-    @property
-    def solutionsList(self): return self.__solutionsList
-
-    @property
-    def importances(self): return self.__importances
-
-    def __normf(self, obj):
-        if self.__norm:
-            return (obj-self.__globalL)/(self.__globalU-self.__globalL)
+    def _calc_w(self, w: npt.NDArray[np.float64]) -> None:
+        """Processes and normalizes the weight vector."""
+        # Adjust weight direction if necessary (gradient direction)
+        # Note: Logic preserved from original
+        norm_gl = self.global_lower
+        norm_gu = self.global_upper
+        
+        if (w @ norm_gl) < (w @ norm_gu):
+            w = w / np.abs(w).sum()
         else:
-            return (obj-self.__globalL)
+            w = w / (-np.abs(w).sum())
 
-    def inicialization(self):
-        self.__M = self.__singleScalar.M
-        neigO = []
+        if self.norm:
+            diff = self.global_upper - self.global_lower
+            diff = np.where(diff == 0, 1.0, diff)
+            w = w / diff
+
+        self.w = np.abs(w)
+
+    def calc_importance(self, solutions_list: List[scalar]) -> None:
+        """
+        Calculates the importance (error bound) of this facet.
+        Uses cached uR if valid, otherwise solves LP.
+        """
+        # Check if cached uR is still valid
+        if self.uR is not None:            
+            # Check feasibility against all solutions
+            is_valid = True
+            for sol in solutions_list:
+                # Cast to runtime attributes to satisfy the type checker
+                norm_w_sol = cast(npt.NDArray[np.float64], getattr(sol, 'w'))
+                norm_obj = cast(npt.NDArray[np.float64], getattr(sol, 'objs'))
+                
+                # Check intersection of half-spaces
+                if not (norm_w_sol @ self.uR >= norm_obj @ norm_w_sol):
+                    is_valid = False
+                    break
+            
+            if is_valid:
+                return
+
+        self._solve_importance_lp(solutions_list)
+
+    def _solve_importance_lp(self, solutions_list: List[scalar]) -> None:
+        """
+        Solves LP to find the lower bound point (uR) and importance.
+        """
+        oidx = list(range(self.M))
+        prob = lp.LpProblem("Lower_point", lp.LpMinimize)
+
+        # Variable uR (Lower bound point estimate)
+        uR = lp.LpVariable.dicts('uR', oidx, cat='Continuous')
+
+        for sol in solutions_list:
+            # Cast to runtime attributes to satisfy the type checker
+            norm_w_sol = cast(npt.NDArray[np.float64], getattr(sol, 'w'))
+            norm_obj = cast(npt.NDArray[np.float64], getattr(sol, 'objs'))
+            
+            expr = lp.lpSum([norm_w_sol[i] * uR[i] for i in oidx])
+            cons = norm_obj @ norm_w_sol
+            prob += (expr >= cons)
+            prob += (expr >= cons)
+
+        # Objective: Minimize projection of uR onto current weight direction
+        norm_w_curr = self.w
+        prob += lp.lpSum([norm_w_curr[i] * uR[i] for i in oidx])
+
+        # Solve
+        solver = lp.PULP_CBC_CMD(msg=False)
+        prob.solve(solver)
+
+        feasible = (prob.status not in [lp.LpStatusInfeasible, lp.LpStatusUnbounded])
+
+        if feasible:
+            self.uR = np.array([lp.value(uR[i]) for i in oidx])
+        else:
+            raise RuntimeError("Non-feasible solution in Importance calculation")
+
+
+class Rennen(MOOptimizer):
+    """
+    Rennen: A posteriori MOO method based on polyhedral approximation (Sandwich Algorithm).
+    """
+    def __init__(
+        self,
+        weighted_scalar: scalar,
+        single_scalar: scalar,
+        target_size: int = 50,
+        norm: bool = True,
+        time_limit: float = float('inf'),
+        verbose: bool = False,
+        debug: bool = False,
+        **kwargs: Any
+    ) -> None:
+        super().__init__(target_size=target_size, time_limit=time_limit, verbose=verbose, debug=debug)
+
+        if (not isinstance(weighted_scalar, (scalar_interface, w_interface)) or
+            not isinstance(single_scalar, (scalar_interface, single_interface))):
+            raise ValueError("Scalarizers must implement correct interfaces.")
+
+        self.weighted_scalar = weighted_scalar
+        self.single_scalar = single_scalar
+        self.norm = norm
+        
+        self.M: int = 0
+        self.global_lower: Optional[npt.NDArray[np.float64]] = None
+        self.global_upper: Optional[npt.NDArray[np.float64]] = None
+        self.max_u: Optional[npt.NDArray[np.float64]] = None
+        
+        self.candidates_list: Dict[Tuple[int, ...], WeightNode] = {}
+        self.selected_simplices: List[Set[int]] = []
+        
+        self.hull_points: List[npt.NDArray[np.float64]] = []
+        self.convex_hull: Optional[ConvexHull] = None
+        self._next_facet: Optional[Set[int]] = None
+        
+        # Tracking
+        self.importances: List[float] = []
+
+    def initialize(self) -> None:
+        self.M = self.single_scalar.M
+        neig_o = []
         parents = []
-        for i in range(self.__M):
-            singleS = copy.copy(self.__singleScalar)
-            logger.debug('Finding '+str(i+1)+'th individual minima')
-            singleS.optimize(i)
-            neigO.append(singleS.objs)
-            self.__solutionsList.append(singleS)
-            parents.append(singleS)
 
-        neigO = np.array(neigO)
-        self.__globalL = neigO.min(0)
-        self.__globalU = neigO.max(0)
-        self.__maxU = neigO.max(0)
-
-        next_ = weight_iter(np.ones(self.M)/self.M, parents, self.__globalL,
-                            self.__globalU, self.__weightedScalar,
-                            norm=self.__norm, point=parents[0].objs)
-        self.__selected = []
-
-        self.__importances = [next_.importance]
-        self.__convexHull = None
-
-        solution = next_.optimize()
-        self.update(next_, solution)
-
-    def update(self, node, solution):
-        self.__solutionsList.append(solution)
-        self.__branch(node, solution)
-        self.__maxU = np.max([self.__maxU, solution.objs], axis=0)
-
-        logger.debug(str(len(self.solutionsList)) +
-                     'th solution, current importance ' + str(node.importance))
-
-    def __dummyPoints(self, solution):
-        '''Generates dummy points described at Definition 7
-        of the referenced paper.
-        '''
-        points = []
+        # 1. Find Individual Minima
         for i in range(self.M):
-            point = self.__normf(solution.objs)
-            point[i] = (self.__normf(self.__globalU)[i] * (self.M) +
-                        self.__normf(self.__globalU)[i] * 0.01)
+            single_s = copy.copy(self.single_scalar)
+            self.logger.debug(f"Finding {i+1}th individual minima")
+            single_s.optimize(i)
+            
+            neig_o.append(single_s.objs)
+            parents.append(single_s)
+            self.update(None, single_s)
+
+        # 2. Compute Bounds
+        neig_o_arr = np.array(neig_o)
+        self.global_lower = neig_o_arr.min(0)
+        self.global_upper = neig_o_arr.max(0)
+        self.max_u = neig_o_arr.max(0)
+
+        # 3. Create Initial Node (Average weight)
+        initial_w = np.ones(self.M) / self.M
+        
+        # Note: Rennen starts by optimizing a central weight formed by the extreme points
+        first_node = WeightNode(
+            w=initial_w,
+            solutions_list=parents,
+            global_lower=cast(npt.NDArray[np.float64], self.global_lower),
+            global_upper=cast(npt.NDArray[np.float64], self.global_upper),
+            weighted_scalar=self.weighted_scalar,
+            point=parents[0].objs, # Reference point, usually not critical for first iter
+            norm=self.norm
+        )
+        
+        # Prepare for first selection (manually triggering optimization of the central point)
+        # We simulate this as a "candidate" to be picked up by select()
+        # For the very first step, we usually just run it. 
+        # But to fit BaseMOO loop, we need to queue it.
+        # Actually, Rennen logic typically: Init -> Optimize Central -> Then Branch.
+        # We can optimize the central point right here in initialize and branch.
+        
+        self.logger.debug("Optimizing initial central weight...")
+        central_sol = first_node.optimize()
+        self.update(first_node, central_sol)
+        
+        # Branching is handled inside update -> _branch
+
+    def select(self) -> Optional[WeightNode]:
+        """
+        Selects the next most important facet/candidate from the list.
+        """
+        if self._next_facet is None:
+            return None
+            
+        facet_key = tuple(self._next_facet)
+        if facet_key in self.candidates_list:
+            next_node = self.candidates_list[facet_key]
+            self.importances.append(next_node.importance)
+            self.selected_simplices.append(self._next_facet)
+            return next_node
+            
+        return None
+
+    def update(self, node: Any, solution: scalar) -> None:
+        """
+        Updates solution set, bounds, and the convex hull approximation (branching).
+        """
+        # 1. BaseMOO update (filtering)
+        super().update(node, solution)
+        
+        # 2. Update Max Upper Bound (used for dummy points)
+        if self.max_u is not None:
+            self.max_u = np.maximum(self.max_u, solution.objs)
+            
+        # 3. Update Convex Hull and Candidates
+        self._branch(node, solution)
+        
+        gap = self._next_node_importance() if self._next_facet else 0.0
+        self.logger.debug(f"Solution added. Next max importance: {gap}")
+
+    def _next_node_importance(self) -> float:
+        if self._next_facet:
+            return self.candidates_list[tuple(self._next_facet)].importance
+        return 0.0
+
+    def _dummy_points(self, solution: scalar) -> List[npt.NDArray[np.float64]]:
+        """Generates dummy points for convex hull construction (Definition 7 in paper)."""
+        # Ensure global bounds are set
+        assert self.global_lower is not None and self.global_upper is not None, "Global bounds must be initialized before generating dummy points"
+        
+        points = []
+        # Use normalized solution and normalized upper bound to build consistent dummy points
+        norm_sol = solution.objs
+        norm_u = self.global_upper
+        
+        for i in range(self.M):
+            point = norm_sol.copy()
+            # Push point far out along axis i
+            point[i] = norm_u[i] * self.M + norm_u[i] * 0.01
             points.append(point)
         return points
 
-    def __newPoints(self, solution):
-        return [self.__normf(solution.objs)]+self.__dummyPoints(solution)
+    def _new_points(self, solution: scalar) -> List[npt.NDArray[np.float64]]:
+        norm_sol = solution.objs
+        return [norm_sol] + self._dummy_points(solution)
 
-    def __isDummy(self, point):
-        return any(point > self.__normf(self.__globalU) * (self.M))
+    def _is_dummy(self, point: npt.NDArray[np.float64]) -> bool:
+        # Ensure global_upper is initialized before performing arithmetic
+        if self.global_upper is None:
+            raise AssertionError("Global upper bounds must be initialized before calling _is_dummy")
+        norm_u = self.global_upper
+        # np.any returns a numpy.bool_, convert explicitly to Python bool
+        return bool(np.any(point > norm_u * self.M))
 
-    def __allDummy(self, points):
-        return all([self.__isDummy(point) for point in points])
+    def _all_dummy(self, points: List[npt.NDArray[np.float64]]) -> bool:
+        return all(self._is_dummy(p) for p in points)
 
-    def __selNotDummy(self, points):
+    def _sel_not_dummy(self, points: List[npt.NDArray[np.float64]]) -> npt.NDArray[np.float64]:
         for point in points:
-            if not self.__isDummy(point):
+            if not self._is_dummy(point):
                 return point
+        return points[0] # Fallback
 
-    def __branch(self, node, solution):
-        old_candidates = self.__candidatesList
-        self.__candidatesList = {}
+    def _branch(self, node: Any, solution: scalar) -> None:
+        """
+        Updates the set of candidates by re-computing the Convex Hull with the new solution.
+        """
+        # Ensure bounds are initialized before creating WeightNode instances
+        assert self.global_lower is not None and self.global_upper is not None, "Global bounds must be initialized before branching"
+        old_candidates = self.candidates_list
+        self.candidates_list = {}
 
-        if self.__convexHull is None:
-            points = [point for sol in self.solutionsList
-                      for point in self.__newPoints(sol)]
-            self.__hullPoints = [point for point in points
-                                 if not convexCombination(points, point)]
+        # 1. Update Hull Points
+        # Add new points (solution + dummies) to the hull set
+        if self.convex_hull is None:
+            # First time: gather all current solutions
+            all_points = []
+            for sol in self.solutions_list:
+                all_points.extend(self._new_points(sol))
+            
+            # Filter redundant points
+            self.hull_points = [p for p in all_points if not convex_combination(all_points, p)]
+            self.convex_hull = ConvexHull(self.hull_points, qhull_options='Q12')
+            
+        elif not already_found(self.hull_points, solution.objs):
+            # Incremental update
+            new_pts = self._new_points(solution)
+            # Add only if not convex combination of existing
+            # Note: Checking against current hull points + new points
+            current_plus_new = self.hull_points + new_pts
+            
+            valid_new_pts = [p for p in new_pts if not convex_combination(current_plus_new, p)]
+            self.hull_points += valid_new_pts
+            
+            if valid_new_pts:
+                self.convex_hull = ConvexHull(self.hull_points, qhull_options='Q12')
 
-            self.__convexHull = ConvexHull(self.__hullPoints,
-                                           qhull_options='Q12')
-
-        elif not alreadyFound(self.__hullPoints, self.__normf(solution.objs)):
-            points = self.__newPoints(solution)
-            self.__hullPoints += [point for point in points
-                                  if not
-                                  convexCombination(self.__hullPoints+points,
-                                                    point)]
-
-            self.__convexHull = ConvexHull(self.__hullPoints,
-                                           qhull_options='Q12')
-
-        nfacets = self.__convexHull.simplices.shape[0]
-
+        # 2. Iterate over Facets (Simplices)
+        n_facets = self.convex_hull.simplices.shape[0]
         next_facet = None
         next_importance = -float('inf')
 
-        for i in range(nfacets):
-            simplice = set(self.__convexHull.simplices[i])
+        for i in range(n_facets):
+            simplice_indices = self.convex_hull.simplices[i]
+            simplice_set = set(simplice_indices)
+            simplice_key = tuple(simplice_set)
 
-            w_ch = self.__convexHull.equations[i][:-1]
+            # Equation of the plane: w @ x + b = 0 -> w is normal vector
+            # ConvexHull.equations returns [w0, w1, ..., wn, offset]
+            eq = self.convex_hull.equations[i]
+            w_ch = eq[:-1]
 
-            points = [self.__convexHull.points[s] for s in simplice]
+            points_on_facet = [self.convex_hull.points[s] for s in simplice_set]
 
-            if (self.__allDummy(points) or  # all dummy means irrelevant facet
-                (any(w_ch < -10**-20) and not  # some negative is numerical err
-                 all(w_ch <= 0))):  # all negative weights can be reversed
+            # Filter irrelevant facets
+            # 1. All points are dummy -> Boundary facet facing infinity
+            # 2. Normal vector has significant negative components (should be positive for Pareto)
+            if self._all_dummy(points_on_facet):
+                continue
+            
+            # Small tolerance for numerical noise in normal vector
+            if np.any(w_ch < -1e-10) and not np.all(w_ch <= 0):
                 continue
 
-            if simplice in self.__selected:
+            # Skip already processed facets
+            if simplice_set in self.selected_simplices:
                 continue
 
-            if (*simplice,) in old_candidates:
-                new_node = old_candidates[(*simplice,)]
+            # Check if we already have a node for this facet from previous iteration
+            if simplice_key in old_candidates:
+                new_node = old_candidates[simplice_key]
+                # Re-calculate importance because the 'solutions_list' (constraints) changed
+                # Only re-calc if it might be the next best
                 if new_node.importance >= next_importance:
-                    new_node.calcImportance(self.__solutionsList)
+                    new_node.calc_importance(self.solutions_list)
             else:
-                point = self.__selNotDummy(points)
-                new_node = weight_iter(w_ch, self.__solutionsList,
-                                       self.__globalL, self.__globalU,
-                                       self.__weightedScalar, norm=self.__norm,
-                                       point=point)
+                # Create new node
+                point = self._sel_not_dummy(points_on_facet)
+                new_node = WeightNode(
+                    w=w_ch,
+                    solutions_list=self.solutions_list,
+                    global_lower=cast(npt.NDArray[np.float64], self.global_lower),
+                    global_upper=cast(npt.NDArray[np.float64], self.global_upper),
+                    weighted_scalar=self.weighted_scalar,
+                    point=point,
+                    norm=self.norm
+                )
 
-            self.__candidatesList[(*simplice,)] = new_node
+            self.candidates_list[simplice_key] = new_node
 
-            if next_facet is None:
-                next_facet = simplice
-            else:
-                if (self.__candidatesList[(*simplice,)].importance >=
-                        next_importance):
-                    next_importance = self.__candidatesList[(*simplice,)].importance
-                    next_facet = simplice
+            # Track best candidate
+            if new_node.importance >= next_importance:
+                next_importance = new_node.importance
+                next_facet = simplice_set
 
-        self.__next_facet = next_facet
-
-    def select(self):
-        self.__selected += [self.__next_facet]
-        next_ = self.__candidatesList[(*self.__next_facet,)]
-        self.__importances += [next_.importance]
-        return next_
-
-    def optimize(self):
-        start = time.perf_counter()
-        self.inicialization()
-
-        node = self.select()
-
-        while (node is not None and
-               len(self.solutionsList) < self.targetSize and
-               time.perf_counter()-start<self.__timeLimit):
-            solution = node.optimize()
-            self.update(node, solution)
-            node = self.select()
-        self.__fit_runtime = time.perf_counter() - start
+        self._next_facet = next_facet

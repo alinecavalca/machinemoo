@@ -2,12 +2,21 @@ import time
 import numpy as np
 import numpy.typing as npt
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any, List, Type, Literal
 
-from machinemoo.utils.logging_config import get_logger
 from machinemoo.scalarization.scalarization_interface import scalar_interface
+from machinemoo.utils.logging_config import get_logger
+from machinemoo.utils.typing import scalar
 
-class BaseMOO(ABC):
+
+__all__ = [
+    'MachineMoo',
+    'get_objectives',
+    'get_models',
+    'run_ensemble'
+]
+
+class MOOptimizer(ABC):
     """
     Abstract base class for Multi-Objective Optimization algorithms.
     
@@ -90,7 +99,7 @@ class BaseMOO(ABC):
         
         self.solutions_list = non_dominated_list
 
-    def update(self, node: Any, solution: scalar_interface) -> None:
+    def update(self, solution: scalar_interface, node: Any) -> None:
         """
         Updates the internal solution list.
         
@@ -137,10 +146,106 @@ class BaseMOO(ABC):
                 self.logger.info("Best solution found.")
                 break
 
-            self.update(node, solution)
+            self.update(solution, node)
             node = self.select()
 
         self.fit_runtime = time.perf_counter() - start_time
         self.logger.info(f"Fit runtime: {self.fit_runtime:.2f} seconds")
         self.logger.info(f"Total optimizations performed: {self.n_optimizations}")
         self.logger.info(f"Final Pareto front size: {len(self.solutions_list)}")
+
+class IPSolvableMixin:
+    """
+    Mixin for algorithms that use Integer Programming (MIP/MIQP).
+    Provides specific parameters for controlling the internal solver.
+    """
+    def __init__(self, node_time_limit: float = float('inf'), node_gap: float = 0.01, **kwargs: Any) -> None:
+        self.node_time_limit = node_time_limit
+        self.node_gap = node_gap
+        # Forward remaining kwargs to the next class in MRO (Method Resolution Order)
+        super().__init__(**kwargs)
+
+class MachineMoo:
+    """
+    Machine Learning Multi-Objective Optimization Handler.
+    Facade for executing MOO algorithms using dependency injection.
+    """
+
+    def __init__(
+        self,
+        weighted_scalar: scalar,
+        single_scalar: scalar | None = None,
+    ) -> None:
+        self.weighted_scalar = weighted_scalar
+        self.single_scalar = single_scalar if single_scalar else weighted_scalar
+        self.logger = get_logger(name='moo_handler')
+
+    def run(
+        self, 
+        optimizer_cls: Type[MOOptimizer], 
+        kwargs: dict[str, Any]
+    ) -> MOOptimizer:
+        """
+        Instantiates and executes an optimizer safely using a configuration object.
+        
+        Args:
+            optimizer_cls: The algorithm class (e.g., MONISE, RandomWeights).
+            config: The configuration object (e.g., MoniseConfig).
+        """
+        # Convert dataclass to dictionary to pass to constructor
+        # This keeps internal flexibility but ensures external typing safety.
+        
+        self.logger.info(f"Initializing {optimizer_cls.__name__} with config: {kwargs}")
+        params = dict(kwargs)  # Copy to avoid mutating input
+        # Make shure that no scalarizers are passed in kwargs if it is, raise error
+        if 'weighted_scalar' in params or 'single_scalar' in params:
+            raise ValueError("Scalarizers should not be passed in kwargs, they are injected automatically.")
+        # Inject scalarizers
+        params['weighted_scalar'] = self.weighted_scalar
+        params['single_scalar'] = self.single_scalar
+
+        try:
+            optimizer = optimizer_cls(**params)
+            optimizer.optimize()
+            return optimizer
+            
+        except TypeError as e:
+            # Catch extra/missing argument errors that **kwargs would usually hide/confuse
+            raise TypeError(f"Error configuring {optimizer_cls.__name__}: {e}. Ensure attrybutes matches the optimizer.") from e
+
+# --- Helper Functions ---
+
+def get_objectives(optimizer: Any) -> npt.NDArray[np.float64]:
+    """Extracts objective vectors from an optimizer's solution list."""
+    if hasattr(optimizer, 'solutions_list'):
+        return np.array([s.objs for s in optimizer.solutions_list])
+    elif hasattr(optimizer, 'solutionsList'): # Legacy support
+        return np.array([s.objs for s in optimizer.solutionsList])
+    raise ValueError("Optimizer does not contain a valid solutions list.")
+
+def get_history_objectives(optimizer: Any) -> npt.NDArray[np.float64]:
+    """Extracts objective vectors from an optimizer's full history list."""
+    if hasattr(optimizer, 'history_list'):
+        return np.array([s.objs for s in optimizer.history_list])
+    elif hasattr(optimizer, 'historyList'): # Legacy support
+        return np.array([s.objs for s in optimizer.historyList])
+    raise ValueError("Optimizer does not contain a valid history list.")
+
+def get_models(optimizer: Any) -> Any:
+    """Extracts trained models from an optimizer's solution list."""
+    if hasattr(optimizer, 'solutions_list'):
+        return np.array([s.x for s in optimizer.solutions_list])
+    elif hasattr(optimizer, 'solutionsList'): # Legacy support
+        return np.array([s.x for s in optimizer.solutionsList])
+    raise ValueError("Optimizer does not contain a valid solutions list.")
+
+def run_ensemble(
+    optimizer: Any,
+    X_train: Any, y_train: Any,
+    X_test: Any, y_test: Any,
+    models: Any = None,
+    ensemble_type: str = 'voting',
+    voting_type: Literal['hard', 'soft'] = 'soft'
+) -> float:
+    # Placeholder implementation
+    return 0.0

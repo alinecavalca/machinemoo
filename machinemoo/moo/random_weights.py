@@ -18,7 +18,7 @@ import numpy as np
 import numpy.typing as npt
 from typing import Any, List, Optional, cast
 
-from machinemoo.core.base_algorithm import BaseMOO
+from machinemoo.moo.core import MOOptimizer
 from machinemoo.utils.typing import scalar
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
 
@@ -65,8 +65,8 @@ class WeightNode:
         Optimizes the current solution using the computed weights.
         Attempts to select the best existing solution as a warm start.
         """
-        best_solution = None
-        best_objective = np.inf
+        best_solution = self._weighted_scalar
+        best_objective = self.w @ self._weighted_scalar.objs
 
         # Find best warm start from existing solutions
         for solution in self._solutions:
@@ -78,7 +78,7 @@ class WeightNode:
                     best_solution = solution
 
         # Setup and run scalarization
-        self._solution = copy.copy(self._weighted_scalar)
+        self._solution = copy.copy(best_solution)
         
         # If we found a warm start, we could potentially set it here 
         # (dependent on scalarizer implementation support for x_init)
@@ -99,7 +99,7 @@ class WeightNode:
         return w
 
 
-class RandomWeights(BaseMOO):
+class RandomWeights(MOOptimizer):
     """
     A posteriori multi-objective optimization algorithm based on sampling 
     random points in the simplex as weight vectors.
@@ -185,10 +185,10 @@ class RandomWeights(BaseMOO):
             self.solutions_list,
         )
 
-    def update(self, node: Any, solution: scalar) -> None:
+    def update(self, solution: scalar, node: Any) -> None:
         """
         Updates the internal solution set using the BaseMOO logic
         to filter out dominated solutions.
         """
         # Explicitly call base class to ensure non-domination filtering happens
-        super().update(node, solution)
+        super().update(solution, node)

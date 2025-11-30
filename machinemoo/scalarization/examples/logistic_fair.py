@@ -5,7 +5,8 @@ from sklearn.metrics import log_loss
 from sklearn.linear_model import LogisticRegression
 from sklearn.utils.extmath import squared_norm
 
-from machinemoo.scalarization.moo_scalarization import Scalarization, LipschitzRegLoghMixin
+# Updated imports: Scalarization -> BaseScalarizer
+from machinemoo.scalarization.core import BaseScalarizer, LipschitzRegLoghMixin
 from machinemoo.scalarization.lipschitz_estimation import (
     calculate_logreg_lipschitz_constant, 
     calculate_l2_regularization_lipschitz_constant
@@ -19,7 +20,7 @@ ArrayLike = npt.ArrayLike
 logger = get_logger(f"moo.{__name__}")
 EPS = 1e-10
 
-class LogRegScalarization(LipschitzRegLoghMixin, Scalarization):
+class FairLogRegMO(LipschitzRegLoghMixin, BaseScalarizer):
     """
     Scalarization for Logistic Regression with Fairness objectives.
     
@@ -61,8 +62,7 @@ class LogRegScalarization(LipschitzRegLoghMixin, Scalarization):
             for g in self.fair_att:
                 mask = (group_values == g)
                 Xg = np.array(self.X)[mask]
-                # Assuming g corresponds to index g in L (careful with non-integer groups)
-                # Ideally map groups to indices 0, 1...
+                
                 idx = int(g) if isinstance(g, (int, float, np.number)) else self.fair_att.index(g)
                 if idx < num_objs:
                     self.L[idx] = calculate_logreg_lipschitz_constant(Xg)
@@ -101,12 +101,10 @@ class LogRegScalarization(LipschitzRegLoghMixin, Scalarization):
             fair_weight = weight
 
         # 2. Compute sample weights for fairness
-        # Normalize weights so they sum appropriately within groups
         fair_weights_dict = {
             ff: fw / max(1, sum(self.X[self.fair_feat] == ff)) # Avoid div/0
             for ff, fw in zip(self.fair_att, fair_weight)
         }
-        # Map feature values to per-sample weights; works for pandas Series or numpy arrays
         sample_weight = np.array([fair_weights_dict[ff] for ff in self.X[self.fair_feat]])
         
         # 3. Train Model
@@ -117,12 +115,8 @@ class LogRegScalarization(LipschitzRegLoghMixin, Scalarization):
         objs = np.zeros(self.M)
         for i, feat in enumerate(self.fair_att):
             if i >= self.M:
-                break  # Safety check
+                break
             
-            # Create mask for this group to calc specific loss
-            # Note: original code re-created sample weights with 1.0 for specific group
-            # This is equivalent to masking the log_loss calculation
-            # Ensure mask, y and y_pred are numpy arrays so boolean indexing is supported
             mask = np.asarray(self.X[self.fair_feat] == feat)
             if mask.sum() > 0:
                 y_arr = np.asarray(self.y)
@@ -146,35 +140,16 @@ class LogRegScalarization(LipschitzRegLoghMixin, Scalarization):
                 Xg = np.array(self.X)[mask]
                 yg = np.array(self.y)[mask]
 
-                # Weight for gradient calculation of this specific group
-                # We want the gradient of the objective *i*, so we pretend w_i=1, others=0
-                
-                # Replicating original logic: construct specific sample weights for the group subset
-                # The original code passed the WHOLE sample_weight vector but constructed it
-                # such that only group `g` had weight. 
-                # Since we sliced Xg/yg, we just need weights for these samples.
-                # Actually, log_loss gradient is just on the samples. 
-                # We need to be careful: calculate_gradient expects X/y/weights aligned.
-                
-                # Original logic implied: Gradient of Obj[i].
-                # So we calculate gradient using only samples from group i.
-                
                 if len(Xg) > 0:
-                    # Weights are 1.0 for the objective calculation itself (average loss)
-                    # Note: get_logistic_gradient uses 'mean' reduction.
-                    # Standard log_loss is mean. So weights should be uniform (None).
                     grads = get_logistic_gradient(Xg, yg, self.model, sample_weight_tensor=None).squeeze()
                     gradients.append(grads)
                 else:
-                    # Edge case: empty group
                     gradients.append(np.zeros(self.model.coef_.size + 1))
 
             if self.M == 3:
-                # Gradient of ||w||^2 is 2*w (intercept b has 0 gradient for reg)
                 grads = 2 * np.concatenate([self.model.coef_.flatten(), [0]])
                 gradients.append(grads)
             
-            # Convert list of gradient vectors to a numpy array to match the annotated return type
             gradients_arr = np.asarray(gradients, dtype=np.float64)
             return self.model, objs, gradients_arr
 

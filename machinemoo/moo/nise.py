@@ -1,432 +1,428 @@
-# -*- coding: utf-8 -*-
-"""
-Noninferior Set Estimation implementation
-
-Author: Marcos M. Raimundo <marcosmrai@gmail.com>
-        Laboratory of Bioinformatics and Bioinspired Computing
-        FEEC - University of Campinas
-
-Reference:
-    Cohon, Jared L., Church, Richard L., Sheer, Daniel P.
-    Generating multiobjective trade‐offs: An algorithm for bicriterion problems
-    1979
-    Water Resources Research
-"""
-# License: BSD 3 clause
-
 import copy
-import time
-import bisect
 import numpy as np
 import numpy.typing as npt
-import warnings
+from typing import List, Optional, cast
+import heapq
+import itertools
 
-from machinemoo.utils.typing import scalar
-from machinemoo import get_logger
-from machinemoo import scalar_interface, w_interface, single_interface
+from machinemoo.moo.core import MOOptimizer
+from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface
 
-__all__ = [
-    "nise"
-]
+__all__ = ["NISE"]
 
-logger = get_logger(f"moo.{__name__}")
-
-class wNode():
-    """Solves a scalarization weight optimization problem for multi-objective learning.
-
-    Node used in the NISE algorithm to represent a candidate region
-    for multi-objective optimization via weighted scalarization.
+class WeightNode:
+    """
+    Represents a candidate region (interval/facet) for the NISE algorithm.
+    
+    It calculates a weight vector 'w' that is orthogonal to the hyperplane 
+    defined by its parent solutions, and determines its importance based on 
+    the potential error (distance) in that region.
     """
     def __init__(
         self,
-        parents: list[scalar],
-        globalL: npt.NDArray[np.float64],
-        globalU: npt.NDArray[np.float64],
-        weightedScalar: scalar,
-        distance: str = 'l2',
-        norm: bool = True
+        parents: List[w_interface],
+        weighted_scalar: w_interface,
+        solutions: List[w_interface] = [],
+        distance_metric: str = 'l2',
     ) -> None:
-        """Initializes the wNode.
-
+        """
         Args:
-            parents (list[scalar]): Parent solutions used to derive this node.
-            globalL (np.ndarray): Global lower bounds of the objectives.
-            globalU (np.ndarray): Global upper bounds of the objectives.
-            weightedScalar (scalar): Scalarization function used for optimization.
-            norm (bool): Whether to normalize objective vectors (unused here). Default is False.
-            distance (str): Distance metric to compute node importance. Default is 'l2'.
+            parents: List of parent solutions defining this region.
+            global_lower: Global lower bounds (Utopia point).
+            global_upper: Global upper bounds (Nadir point).
+            weighted_scalar: Scalarization prototype.
+            distance_metric: 'l2' (Euclidean) or 'algebraic' distance for importance.
+            norm: Whether to normalize objectives.
         """
-        self.__distance = distance
-        self.__weightedScalar = weightedScalar
-        self.__M = weightedScalar.M
-        self.__globalL, self.__globalU = globalL, globalU
-        self.__parents = parents
-        self.__norm = norm
-        self.__calcW()
-        self.__calcImportance()
-
-    @property
-    def importance(self) -> float:
-        """Importance score of this weight vector for next iteration.
-
-        Returns:
-            float: The separation margin between upper and lower bounds.
-        """
-        return self.__importance
-
-    @property
-    def parents(self) -> list[scalar]:
-        """List of parent solutions used to generate this node.
-
-        Returns:
-            list[scalar]: Array of solution objects used as input.
-        """
-        return self.__parents
-
-    @property
-    def solution(self) -> scalar:
-        """Returns the scalarized solution for this node.
-
-        Returns:
-            scalar: The best solution found using the computed weights.
-        """
-        return self.__solution
-
-    @property
-    def w(self) -> npt.NDArray[np.float64]:
-        """ Weighting vector, which ponderates the objectives of the
-        weighted sum method in the scalarization method.
-
-        Returns:
-            np.ndarray: The vector of weights for scalarization.
-        """
-        return self.__w
-
-    def __normf(self, obj: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Normalize the objectives
-
-        Args:
-            objs (np.ndarray): Objective vector to be normalized
+        self.parents = parents
+        self.weighted_scalar = weighted_scalar
+        self.solutions = solutions
+        self.distance_metric = distance_metric
+        self.M = int(weighted_scalar.M)
         
-        Returns:
-            np.ndarray: Normalized objective vector
-        """
-        if self.__norm:
-            return (obj-self.__globalL)/(self.__globalU-self.__globalL)
-        else:
-            return (obj-self.__globalL)
+        self.w: npt.NDArray[np.float64]
+        self.importance: float
+        self._solution: Optional[w_interface] = None
+        self.best_solution_reached = False
 
-    def __normw(self, w: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Normalize the weights
-
-        Args:
-            w (np.ndarray): Weighting vector, ponderates the objectives of the
-                            weighted sum method.
-
-        Returns:
-            np.ndarray: Normalized weighting vector if normalization is True
-        """
-        if self.__norm:
-            w_ = w*(self.__globalU-self.__globalL)
-            return w_/w_.sum()
-        else:
-            return w
+        # Compute state immediately
+        self._calc_w()
+        self._calc_importance()
 
     @property
     def useful(self) -> bool:
-        """Check if the current solution provides new information between parents.
-        
-        Returns:
-            bool: True if current solution provedes new information, False otherwise
         """
-        P = np.array([[i for i in p.objs] for p in self.parents])
-        between = ((self.__solution.objs >= P.min(axis=0)).all()
-                   and (self.__solution.objs <= P.max(axis=0)).any())
-        equal = ((self.__solution.objs == P[0, :]).all() or
-                 (self.__solution.objs == P[1, :]).all())
-        return between and not equal
-
-    def optimize(self, hotstart: list[scalar] = []) -> scalar:
-        """Optimize using the weighted scalar method.
-
-        Args:
-            hotstart (list[scalar]): Initial solution.
-
-        Returns:
-            scalar: Optimized solution for this weight vector.
+        Checks if the current solution provides new information between parents.
+        Used to prevent infinite refinement of the same point.
         """
-        self.__solution = copy.copy(self.__weightedScalar)
-        
-        self.__solution.optimize(self.w)
+        if self._solution is None:
+            return False
             
-        return self.__solution
+        # Extract parent objectives matrix
+        P = np.array([p.objs for p in self.parents])
+        sol_objs = self._solution.objs
+        
+        # Check if solution is strictly bounded by parents (in the "middle")
+        # Logic: It must be >= min(parents) AND <= max(parents) in all dims
+        # AND it must not be equal to any parent.
+        is_between = (
+            np.all(sol_objs >= P.min(axis=0)) and 
+            np.any(sol_objs <= P.max(axis=0))
+        )
+        
+        is_duplicate = any(np.all(np.isclose(sol_objs, p_objs)) for p_objs in P)
+        
+        return bool(is_between and not is_duplicate)
 
-    def __calcImportance(self) -> None:
-        """Calculate the importance of the node based on the objective geometry."""
-        if self.__w is None:
-            self.__importance = 0
-        else:
-            X = [[i for i in self.__normw(p.w)] for p in self.__parents]
-            y = [self.__normf(p.objs)@self.__normw(p.w) for p in self.__parents]
-    
-            r = self.__normf(self.__parents[0].objs)
-            p = np.linalg.solve(X, y)
-            if self.__distance == 'l2':
-                self.__importance = (self.__normw(self.w)@(r-p) /
-                                     np.linalg.norm(self.__normw(self.w)))**2
-            else:
-                self.__importance = self.__normw(self.w)@(r-p)
+    def optimize(self) -> w_interface:
+        """Optimizes the scalarization using the calculated normal weight."""
+        # Safety fallback
+        weight = self.w if self.w is not None else np.ones(self.M) / self.M
+        assert weight is not None
+        
+        # Warm start logic (simplificado)
+        best_obj = self.w @ self.weighted_scalar.objs
+        best_sol = self.weighted_scalar
+        
+        for s in self.solutions:
+            # Produto escalar seguro
+            val = self.w @ s.objs
+            if val < best_obj:
+                best_obj = val
+                best_sol = s
 
-    def __calcW(self) -> None:
-        """Solve linear system to compute new weighting vector."""
-        objs = [i.objs for i in self.__parents]
-        logger.debug(objs)
-        X = [[i for i in self.__normf(p.objs)]+[-1] for p in self.__parents]
-        X = np.array(X + [[1]*self.__M+[0]])
-        y = [0]*self.__M+[1]
+        self._solution = copy.copy(best_sol)
+        self._solution.optimize(self.w)
+        
+        return self._solution
 
+    def _calc_w(self) -> None:
+        """
+        Solves a linear system to find the weight vector 'w' such that the
+        weighted sum is constant for all parent solutions (defining a hyperplane).
+        """
+        # System: w @ (p1 - p0) = 0, ..., w @ (pn - p0) = 0
+        # Implemented as solving Xw = y where last row enforces sum(w)=1
+        
+        # Construct matrix X
+        # Rows 0..M-1: Normalized objectives of parents
+        # We append -1 to handle the hyperplane offset formulation w*x = c
+        # X shape: (M+1, M+1)
+        
+        # Note: Original NISE logic for M=2 usually simplifies to slope calc.
+        # General logic for M objectives requires M parents.
+        
+        # Prepare rows for linear system
+        rows = []
+        for p in self.parents:
+            rows.append(list(p.objs) + [-1.0])
+        
+        # Add constraint: sum(w) = 1 (ignoring offset c)
+        # Row format: [1, 1, ..., 1, 0]
+        rows.append([1.0] * self.M + [0.0])
+        
+        X = np.array(rows)
+        y = np.zeros(len(rows))
+        y[-1] = 1.0 # Result for sum(w)=1 constraint
+
+        # Solve
         try:
-            w_ = np.linalg.solve(X, y)[:self.__M]
-            if self.__norm:
-                w_ = w_/(self.__globalU-self.__globalL)
-
-            self.__w = w_/w_.sum()
+            res = np.linalg.solve(X, y)
         except np.linalg.LinAlgError:
-            self.__w = None
+            # Fallback to least squares if singular
+            res, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
+        
+        # The first M elements are the weights
+        w_raw = res[:self.M]
+        
+        s = w_raw.sum()
+        if s != 0:
+            self.w = w_raw / s
+        else:
+            # find a random weight using the average of the parents
+            self.w = np.mean([p.w for p in self.parents], axis=0)
 
-class nise():
+    def _calc_importance(self, rcond: float=1e-10) -> None:
+        """
+        Calculates importance by finding the intersection of parents' hyperplanes.
+        """
+        if self.w is None:
+            self._calc_w()
+
+        X = [[i for i in p.w] for p in self.parents]
+        y = [p.objs@p.w for p in self.parents]
+        try:
+            p = np.linalg.solve(X, y)
+        except np.linalg.LinAlgError:
+            p, residuals, rank, s = np.linalg.lstsq(X, y, rcond=rcond)
+
+        # Find the reference point in w plane
+        r = self.parents[0].objs #one of the parents
+
+
+        if self.distance_metric == 'l2':
+            self.importance = float((self.w@(r-p) /
+                                    np.linalg.norm(self.w))**2)
+        else:
+            self.importance = float(self.w@(r-p))
+
+class ExtremeNode(WeightNode):
     """
-    Non-inferior Set Estimation (NISE) algorithm for multi-objective optimization.
-
-    This algorithm is based on weighted sum and iteratively explores the Pareto
-    frontier by solving a sequence of weighted scalarization problems using the
-    wNode structure.
+    Specialized WeightNode for extreme points (single parent).
     """
     def __init__(
         self,
-        weightedScalar: scalar,
-        singleScalar: scalar | None= None,
-        targetGap: float = 0.0,
-        targetSize: int | None = None, 
-        hotstart: list[scalar] = [],
-        norm: bool = True, 
-        timeLimit: float = float('inf'),
-        objective: str = 'l2'
+        parent: w_interface,
+        dimension: int,
+        weighted_scalar: w_interface,
+        solutions: List[w_interface] = [],
+        distance_metric: str = 'l2',
     ) -> None:
-        """Initializes NISE class
+        self.dimension = dimension
+        super().__init__(
+            parents=[parent],
+            weighted_scalar=weighted_scalar,
+            solutions=solutions,
+            distance_metric=distance_metric,
+        )
 
-        Args:
-            weightedScalar (scalar): An instance of a class solving weighted sum scalarizations.
-            singleScalar (scalar | None): An instance of a class solving single-objective problems.
-            targetGap (float): Termination criterion based on importance ratio. Default is 0.0.
-            targetSize (int): Desired number of Pareto solutions.
-                Defaults to 20 × number of objectives if not specified.
-            hotstart (list[scalar]): Initial solutions/models to warm-start the optimization.
-            norm (bool): Whether to normalize objectives and weights. Default is True.
-            timeLimit (float): Maximum execution time. Default is infinity.
-            objective (str): Distance metric to compute node importance. Default is 'l2'.
+    @property
+    def useful(self) -> bool:
         """
-        if (not isinstance(weightedScalar, scalar_interface) or
-            not isinstance(weightedScalar, w_interface) or
-            not isinstance(singleScalar, scalar_interface) or
-                not isinstance(singleScalar, single_interface)):
-            raise ValueError('''weightedScalar and singleScalar must be a
-                             mo_problem implementation.''')
-
-        self.__weightedScalar = weightedScalar
-        self.__singleScalar = singleScalar
-        self.__targetGap = targetGap
-        self.__targetSize = (targetSize if targetSize is not None else
-                             20*self.__weightedScalar.M)
-        self.__norm = norm
-
-        self.__currImp = 1
-        self.__maxImp = 1
-        self.__hotstart = hotstart
-        self.__solutionsList = []
-        self.__candidatesList = []
-        self.__timeLimit = timeLimit
-        self.__objective = objective
-
-    def __del__(self) -> None:
-        """Deletes the solutions list attribute from the object if it exists.
+        Extreme nodes are always useful as they define boundaries.
+        """
+        return True
+    
+    def _calc_w(self) -> None:
+        """
+        For extreme nodes, set weight to focus entirely on the specific dimension.
+        """
+        w = np.zeros(self.M)
+        w[self.dimension] = 1.0
         
-        This is a cleanup method called when the object is about to be destroyed.
-        """
-        if hasattr(self, '__solutionsList'):
-            del self.__solutionsList
+        self.w = w
 
-    @property
-    def targetSize(self) -> int: 
-        """Target number of Pareto-optimal solutions.
+    def _calc_importance(self) -> None:
+        parent = self.parents[0]
 
-        Returns:
-            int: The number of solutions to aim for in the optimization process.
-        """
-        return self.__targetSize
-
-    @property
-    def targetGap(self) -> float:
-        """Target minimum relative gap between solutions.
-
-        Returns:
-            float: The convergence threshold used to stop refinement.
-        """
-        return self.__targetGap
-
-    @property
-    def maxImp(self) -> float:
-        """Maximum importance value observed so far.
-
-        Returns:
-            float: The highest importance score recorded during optimization.
-        """
-        return self.__maxImp
-
-    @property
-    def currImp(self) ->  float:
-        """Current importance score based on recent iterations.
-
-        Returns:
-            float: Maximum importance value from the last `smooth_count` iterations.
-        """
-        return self.__currImp
-
-    @property
-    def solutionsList(self) -> list[scalar]:
-        """List of current Pareto-optimal solutions.
-
-        Returns:
-            list[scalar]: An array containing objective values of the solutions.
-        """
-        return self.__solutionsList
-
-    @property
-    def hotstart(self) -> list[scalar]:
-        """Get the list of initial solutions (hotstart) for the optimization process.
-
-        Returns:
-            list[scalar]: Combined list of warm-start solutions and previously found solutions.
-        """
-        return self.__hotstart+self.solutionsList
-
-    def inicialization(self) -> None:
-        """Initialize scalarizations and compute extreme points (utopia/nadir).
-
-        Raises:
-            ValueError: If number of objectives is not 2.
-        """
-        self.__M = self.__singleScalar.M
-        if self.__M != 2:
-            raise ValueError('''NISE only support MOO problems with
-                             2 objectives.''')
-        neigO = []
-        parents = []
-        for i in range(self.__M):
-            singleS = copy.copy(self.__singleScalar)
-            logger.debug('Finding '+str(i)+'th individual minima')
-            try:
-                singleS.optimize(i, hotstart=self.hotstart)
-            except:
-                singleS.optimize(i)
-            neigO.append(singleS.objs)
-            self.__solutionsList.append(singleS)
-            parents.append(singleS)
-
-        neigO = np.array(neigO)
-        self.__globalL = neigO.min(0)
-        self.__globalU = neigO.max(0)
-
-        self.__candidatesList = wNode(parents, self.__globalL, self.__globalU,
-                                       self.__weightedScalar, norm=self.__norm,
-                                       distance=self.__objective)
-        self.__candidatesList = [self.__candidatesList]
-
-        self.__maxImp = self.__candidatesList[-1].importance
-        self.__currImp = self.__candidatesList[-1].importance
-
-    def select(self) ->  wNode | None:
-        """Selects next candidate node to explore.
-
-        Returns:
-            wNode or None: The most relevant unbounded candidate.
-        """
-        bounded_ = True
-        while bounded_ and self.__candidatesList != []:
-            candidate = self.__candidatesList.pop()
-            bounded_ = (candidate.w < 0).any()
-
-        if bounded_:
-            return None
+        assert parent is not None        
+        assert self.w is not None
+        
+        p = parent.objs_lb
+        r = parent.objs
+        if self.distance_metric == 'l2':
+            self.importance = float((self.w@(r-p) /
+                               np.linalg.norm(self.w))**2)
         else:
-            return candidate
+            self.importance = float(self.w@(r-p))
 
-    def update(self, node: wNode, solution: scalar) -> None:
-        """
-        Update solutions list with a new solution.
-        Add a new solution to the Pareto set and explore new regions.
 
-        Args:
-            node (wNode): Current candidate node.
-            solution (scalar): Corresponding scalarized solution.
-        """
-        try:
-            self.solutionsList.append(solution)
-            if any([all(p.objs==node.solution.objs) for p in node.parents]):
-                raise RuntimeError('Optimization issues.')
-            if not node.useful:
-                raise RuntimeError('Optimization issues.')
-            self.__branch(node, solution)
-        except RuntimeError:# as msg:
-            warnings.warn('Not optimal solver or nonconvex problem')
+class NISE(MOOptimizer):
+    """
+    Non-Inferior Set Estimation (NISE) algorithm.
+    
+    A classical method that iteratively explores the Pareto frontier by solving 
+    weighted sum problems. Efficient for 2 objectives (bicriterion).
+    """
+    def __init__(
+        self,
+        weighted_scalar: w_interface,
+        single_scalar: w_interface,
+        # Base Parameters
+        target_size: int = 50,
+        time_limit: float = float('inf'),
+        verbose: bool = False,
+        debug: bool = False,
+        # NISE Specific
+        target_gap: float = 0.0,
+        norm: bool = True,
+        objective_metric: str = 'l2'
+    ) -> None:
+        super().__init__(
+            target_size=target_size, 
+            time_limit=time_limit, 
+            verbose=verbose, 
+            debug=debug
+        )
 
-        if self.__candidatesList != []:
-            self.__currImp = self.__candidatesList[-1].importance
-        gap = self.currImp/self.__maxImp
+        if not isinstance(weighted_scalar, (scalar_interface, w_interface)):
+            raise ValueError("Scalarizers must implement correct interfaces.")
 
-        logger.debug(str(len(self.solutionsList))+'th solution' +
-                     ' - importance: ' + str(gap))
+        self.weighted_scalar = weighted_scalar
+        self.single_scalar = single_scalar
+        self.target_gap = target_gap
+        self.norm = norm
+        self.objective_metric = objective_metric
+        
+        # State
+        self.M: int = self.single_scalar.M
+        self.global_lower: Optional[npt.NDArray[np.float64]] = None
+        self.global_upper: Optional[npt.NDArray[np.float64]] = None
+        self.max_imp: float = 1.0
+        self.curr_imp: float = 1.0
+        
+        # Priority queue for candidates (sorted by importance)
+        self.candidates_list: List[WeightNode] = []
 
-    def __branch(self, node: wNode, solution: scalar) -> None:
-        """
-        Generate new candidate nodes by branching from a given solution.
+    def initialize(self) -> None:
+        """Initializes by finding individual minima and creating the first Node."""
+        self.M = self.single_scalar.M
+        if self.M != 2:
+            self.logger.warning("NISE is theoretically optimized for 2 objectives. Behavior on M > 2 is experimental.")
 
-        Args:
-            node (wNode): Parent node.
-            solution (scalar): New solution to create branches from.
-        """
-        for i in range(self.__M):
-            parents = [p if j != i else node.solution
-                       for j, p in enumerate(node.parents)]
-            boxW = wNode(parents, self.__globalL, self.__globalU,
-                          self.__weightedScalar, norm=self.__norm, 
-                          distance=self.__objective)
-
-            # avoiding over representation of some regions
-            maxdist = max(abs(parents[0].objs-parents[1].objs)/(self.__globalU-self.__globalL))
+        neig_o = []
+        parents = []
+        
+        # 1. Find Individual Minima
+        for i in range(self.M):
+            self.logger.debug(f"Finding {i+1}th individual minimum")
+            single_s = copy.copy(self.single_scalar)
+            single_s.optimize(i)
             
-            if boxW.w is not None and not (boxW.w < 0).any() and maxdist>1./self.targetSize:
-                index = bisect.bisect_left([c.importance
-                                            for c in self.__candidatesList],
-                                           boxW.importance)
-                self.__candidatesList.insert(index, boxW)
+            neig_o.append(single_s.objs)
+            parents.append(single_s)
+            solutions_list: List[w_interface] = cast(List[w_interface], self.solutions_list)
+            extreme_node = ExtremeNode(single_s, i, self.weighted_scalar, solutions_list, self.objective_metric)
+            self.update(single_s, extreme_node)
 
-    def optimize(self) -> None:
+        # 2. Compute Bounds
+        neig_o_arr = np.array(neig_o)
+        self.global_lower = neig_o_arr.min(0)
+        self.global_upper = neig_o_arr.max(0)
+        assert self.global_lower is not None
+        assert self.global_upper is not None
+
+        # 3. Create First Node (The region covering the entire initial front)
+        first_node = WeightNode(
+            parents=parents,
+            weighted_scalar=self.weighted_scalar,
+            distance_metric=self.objective_metric
+        )
+        solution = first_node.optimize()
+        self.update(solution, first_node)
+        
+
+    def select(self) -> Optional[WeightNode]:
         """
-        Execute the full NISE algorithm to approximate the Pareto frontier.
+        Selects the next most important candidate node.
+        NISE prioritizes regions with the largest potential error (importance).
         """
-        start = time.perf_counter()
-        self.inicialization()
+        # Filter out nodes with invalid/negative weights (bounded regions)
+        # and pop the one with highest importance (list is sorted by importance)
 
-        node = self.select()
+        candidate: Optional[WeightNode] = None
+        while self.candidates_list:
+            candidate = self.candidates_list.pop()
 
-        while (node is not None and
-               self.currImp/self.maxImp > self.targetGap and
-               len(self.solutionsList) < self.targetSize and
-               time.perf_counter()-start<self.__timeLimit):
+            assert candidate.w is not None
+            if  np.all(candidate.w >= 0):
+                break
+        return candidate
 
-            solution = node.optimize(hotstart=self.hotstart)
-            self.update(node, solution)
-            node = self.select()
-        self.__fit_runtime = time.perf_counter() - start
-        logger.info(f"Fit runtime: {self.__fit_runtime:.2f} seconds")
+    def update(self, solution: w_interface, node: WeightNode) -> None:
+        """
+        Updates the solution list and branches the current node into sub-regions.
+        """
+        # 1. Base update
+        super().update(solution, node)
+        self._branch(node, solution)
+
+    def _branch(self, node: WeightNode, solution: w_interface) -> None:
+        """
+        Splits the current node region into M new regions using the new solution.
+        Updates the candidates list accordingly.
+        """
+        def branch_logic(node: WeightNode,
+                         solution: w_interface) -> tuple[bool, bool, list[WeightNode]]:        
+            assert node.w is not None
+            child_nodes = []
+            parents = node.parents
+            
+            if isinstance(node, ExtremeNode):
+                parent = parents[0]
+                if node.w@solution.objs >= node.w@parent.objs:
+                    related = False
+                    branch = False
+                    return branch, related, child_nodes
+                else:
+                    child = ExtremeNode(
+                        parent=solution,
+                        dimension=node.dimension,
+                        weighted_scalar=self.weighted_scalar,
+                        distance_metric=self.objective_metric
+                    )
+                    # Aproveitamos o nó extremo existente
+                    child_nodes.append(child)
+                    return True, True, child_nodes
+
+            if node.w@solution.objs >= node.w@parents[0].objs:
+                related = False
+                branch = False
+                return branch, related, child_nodes
+            else:
+                related = True
+                branch = True
+
+
+            for p in parents:
+                if p.w@solution.objs < p.w@p.objs:
+                    branch = False
+                    continue
+            
+                new_parents = [solution, p]
+                
+                child_node = WeightNode(
+                    parents=new_parents,
+                    weighted_scalar=self.weighted_scalar,
+                    distance_metric=self.objective_metric
+                )
+            
+                child_nodes.append(child_node)
+
+            return branch, related, child_nodes
+        branch, related, child_nodes = branch_logic(node, solution)
+        
+        if not branch:
+            keep_mask = [True]*len(self.candidates_list)
+            for i in range(len(self.candidates_list)-1, -1, -1):
+                candidate = self.candidates_list[i]
+                branch_, related_, child_nodes_ = branch_logic(candidate, solution)
+                keep_mask[i] = not related_
+                if not branch_:
+                    child_nodes.extend(child_nodes_)
+        else:
+            keep_mask = [True]*len(self.candidates_list)
+
+        #If main node is not related, add it back using child nodes
+        if not related:
+            child_nodes.append(node)
+            
+        self.candidates_list = merge_lists(self.candidates_list, keep_mask, child_nodes)
+        if len(self.candidates_list) <= 2:
+            self.initialize()
+
+def merge_lists(large_sorted: list[WeightNode], keep_mask: list[bool], small_unsorted: list[WeightNode]) -> list[WeightNode]:
+    """
+    Merges a large sorted list with a small unsorted list in O(N + M) time.
+    
+    Args:
+        large_sorted: The existing large list (must be already sorted).
+        small_unsorted: The new small list to insert.
+        key: A function to extract the comparison key (e.g., lambda x: x.importance).
+    """
+    def key(node: WeightNode) -> float:
+        return node.importance
+    # 1. Sort the small list. 
+    # Cost: O(M log M) - Negligible since M is small.
+    small_unsorted.sort(key=key)
+    
+    # 2. Criar um iterador filtrado da lista grande (Custo: O(1) para criar)
+    # itertools.compress não aloca lista nova. Ele apenas avança o ponteiro 
+    # se keep_mask[i] for True.
+    large_filtered_iter = itertools.compress(large_sorted, keep_mask)
+
+    # 2. Linear Merge.
+    # heapq.merge is implemented in C. It iterates both lists once.
+    # list() consumes the iterator to create the new structure.
+    # Cost: O(N + M)
+    return list(heapq.merge(large_filtered_iter, small_unsorted, key=key))

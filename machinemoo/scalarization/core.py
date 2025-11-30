@@ -5,9 +5,9 @@ from collections.abc import Callable
 from typing_extensions import Self
 
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface, single_interface
-from machinemoo.moo.fix_weight import solve_optimal_w
+from machinemoo.moo.fix_weight import solve_optimal_w_active_set#, solve_optimal_w_scipy
 
-class Scalarization(w_interface, single_interface, scalar_interface):
+class BaseScalarizer(w_interface, single_interface, scalar_interface):
     """
     Base class for scalarization strategies in multi-objective optimization.
 
@@ -96,7 +96,6 @@ class Scalarization(w_interface, single_interface, scalar_interface):
         else:
             # Assume it's a float factor
             factor = float(self.lower_bound_estimate)
-            # Use NumPy multiply to ensure scalar-array multiplication is type-checked correctly
             self._objs_lb = np.asarray(self.objs, dtype=np.float64) - np.multiply(factor, np.abs(self.objs))
             
         return self._objs_lb
@@ -166,7 +165,7 @@ class Scalarization(w_interface, single_interface, scalar_interface):
         elif len(result) == 3:
             model, objs, gradient = result
             self._gradient = gradient
-            self._w = solve_optimal_w(self._gradient, self.L)
+            self._w = solve_optimal_w_active_set(np.array(gradient), self.L)
         else:
             raise ValueError("training() must return a tuple of 2 or 3 elements (model, objs, [gradient])")
 
@@ -183,49 +182,40 @@ class Scalarization(w_interface, single_interface, scalar_interface):
 class LipschitzTorchMixin:
     """Mixin that provides a Lipschitz calculation for PyTorch-based scalarizations."""
 
-    # Attributes expected to be provided by the host class (e.g. Scalarization)
-    gradient: Optional[npt.NDArray[np.float64]]  # gradient per objective or None
-    L: Optional[npt.NDArray[np.float64]]         # Lipschitz constants per objective
-    w: npt.NDArray[np.float64]                   # weight vector
-    objs: npt.NDArray[np.float64]                # current objectives
+    # Mixin expects these attributes from the host class
+    gradient: Optional[npt.NDArray[np.float64]]
+    L: Optional[npt.NDArray[np.float64]]
+    w: npt.NDArray[np.float64]
+    objs: npt.NDArray[np.float64]
 
     def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
         """
         Returns a lower estimate of the objective values using Lipschitz constants.
-        
-        Assumes `self.gradient` is a list/array of gradients per objective, 
-        and `self.L` is an array of Lipschitz constants per objective.
         """
         if self.gradient is None or self.L is None:
-            # Fallback if data is missing
             return self.objs
 
-        # Ensure gradient is array-like for calculation
-        grads = np.array(self.gradient) # shape (M, n_params) or similar
-        
-        # Weighted gradient (approximate gradient of scalarized loss)
-        # w_gradient = sum(w_i * grad_i)
+        grads = np.array(self.gradient)
         w_gradient = self.w @ grads 
-        
-        # Weighted Lipschitz constant
         w_L = self.w @ self.L
         
-        # If weighted Lipschitz is effectively zero, return current objectives
         if w_L <= 1e-9:
             return self.objs
 
-        # Compute quadratic correction (scalar) and subtract from objectives
-        objs_delta = (1/w_L) * grads@w_gradient - (1/2)*(self.L/(w_L**2))*(w_gradient@w_gradient)
+        # Quadratic correction
+        # Note: This assumes specific structure of gradients for the correction term
+        objs_delta = (1/w_L) * grads @ w_gradient - (1/2) * (self.L / (w_L**2)) * (w_gradient @ w_gradient)
         return np.asarray(self.objs, dtype=np.float64) - objs_delta
+
 
 class LipschitzRegLoghMixin:
     """Mixin that provides a Lipschitz calculation using Logistic Regression logic."""
 
-    # Attributes expected to be provided by the host class (e.g. Scalarization)
-    gradient: Optional[npt.NDArray[np.float64]]  # Jacobian-like per objective or None
-    L: Optional[npt.NDArray[np.float64]]         # Lipschitz constants per objective
-    w: npt.NDArray[np.float64]                   # weight vector
-    objs: npt.NDArray[np.float64]                # current objectives
+    # Mixin expects these attributes from the host class
+    gradient: Optional[npt.NDArray[np.float64]]
+    L: Optional[npt.NDArray[np.float64]]
+    w: npt.NDArray[np.float64]
+    objs: npt.NDArray[np.float64]
 
     def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
         """
@@ -242,18 +232,18 @@ class LipschitzRegLoghMixin:
         if L_scalar == 0:
             return self.objs
 
-        # Specific formula from the referenced logic
-        # Note: This logic assumes specific structure of gradient/L
+        # Formula specific to linear models/logistic regression
         objs_delta = (1/L_scalar) * (J @ grad_w) - (1/2) * (self.L / (L_scalar**2)) * (grad_w @ grad_w)
         
         return self.objs - objs_delta
 
 
-class MooScalarization(Scalarization):
+class FunctionalScalarizer(BaseScalarizer):
     """
-    Implements scalarization for generic machine learning models using an external training function.
+    Implements scalarization for machine learning models using an external training function.
     
-    Can optionally support Lipschitz estimation if `lipschitz_constants` are provided.
+    This replaces the old 'MooScalarization' name to clearer indicate its purpose:
+    it wraps a functional training routine.
     """
     def __init__(
         self,
@@ -270,33 +260,22 @@ class MooScalarization(Scalarization):
         **kwargs: Any
     ) -> None:
         """
-        Initializes the MooScalarization instance.
-
         Args:
             model (Any): Initial machine learning model.
             train_fn (Callable): Function: (model, weights) -> (objectives, updated_model, [gradient]).
             num_objs (int): Number of objectives.
-            lipschitz_constants (np.ndarray, optional): Array of Lipschitz constants for the objectives. 
-                                                        Required if lower_bound_estimate="lipschitz".
+            lipschitz_constants (np.ndarray, optional): Array of Lipschitz constants.
         """
-        # Determine default estimation strategy based on provided constants
         estimate_type = kwargs.pop("lower_bound_estimate", "lipschitz" if lipschitz_constants is not None else "zero")
-
-        # Initialize base class with number of objectives and chosen lower-bound strategy
+        
         super().__init__(num_objs=num_objs, lower_bound_estimate=estimate_type, **kwargs)
 
-        # Store model and training function
         self.model = model
         self.train_fn = train_fn
-
-        # Store Lipschitz constants if provided
         self.L = np.array(lipschitz_constants, dtype=np.float64) if lipschitz_constants is not None else None
 
     def training(self, weight: npt.NDArray[np.float64]) -> Union[Tuple[Any, npt.NDArray[np.float64]], Tuple[Any, npt.NDArray[np.float64], Optional[Any]]]:
-        """
-        Delegates training to the provided `train_fn` and normalizes the returned tuple to
-        (model, objs) or (model, objs, gradient) as expected by Scalarization.optimize.
-        """
+        """Delegates training to the provided function."""
         result = self.train_fn(self.model, weight)
 
         if not isinstance(result, (tuple, list)):
@@ -305,7 +284,6 @@ class MooScalarization(Scalarization):
         if len(result) == 3:
             objs, model, grad = result
             objs_arr = np.asarray(objs, dtype=np.float64)
-            # update stored model reference with returned model
             self.model = model
             return model, objs_arr, grad
         elif len(result) == 2:
@@ -317,16 +295,11 @@ class MooScalarization(Scalarization):
             raise ValueError("train_fn must return (objs, model) or (objs, model, gradient)")
 
     def _compute_lipschitz(self) -> npt.NDArray[np.float64]:
-        """
-        Generic Lipschitz estimation using the quadratic approximation (similar to TorchMixin).
-        """
+        """Generic Lipschitz estimation using quadratic approximation."""
         if self.gradient is None or self.L is None:
             return self.objs
 
-        # We assume gradient is shaped correctly [M, n_params] or flattened compatible
         grads = np.array(self.gradient)
-
-        # Weighted combination
         w_gradient = self.w @ grads
         w_L = self.w @ self.L
 

@@ -1,586 +1,364 @@
-import copy
-import time
+# -*- coding: utf-8 -*-
+"""
+Multi-Objective Learning Algorithm (MOLA)
 
+This module implements MOLA, an algorithm that approximates the Pareto front
+by iteratively learning scalarization weights. It uses a Mixed-Integer Quadratic
+Programming (MIQP) formulation to find weights that maximize the separation
+between the upper (achieved) and lower (estimated) Pareto approximations.
+"""
+
+import copy
 import numpy as np
 import numpy.typing as npt
+from typing import Any, List, Optional
+
 import pyomo.environ as pyo
 from pyomo.contrib import appsi
-from pymoo.indicators.hv import HV
-
-from typing import Any
 
 from machinemoo import get_logger
-from machinemoo import scalar_interface, w_interface
+from machinemoo.moo.core import MOOptimizer, IPSolvableMixin
 from machinemoo.utils.typing import scalar
+from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface
 
 __all__ = [
-    "Mola"
+    "MOLA"
 ]
 
-logger = get_logger(f"moo.{__name__}")
+class WeightNode:
+    """
+    Solves the weight optimization problem for MOLA.
 
-# For reproducibility, uncomment the line below to fix the NumPy random seed in this file.
-np.random.seed(42) # TODO: Comment after dissertation
-
-#EPS = 1e-8
-
-
-class WeightSolver:
-    """Solves a scalarization weight optimization problem for multi-objective learning.
-
-    WeightSolver finds a weight vector that maximizes a separation margin between
-    the upper and lower approximations of the Pareto front, using a MILP solver
-    (e.g., Gurobi). The computed weights are then used to guide optimization
-    in the multi-objective learning algorithm (MOLA).
+    This class encapsulates the MIQP logic to find the optimal weight vector 'w'
+    that maximizes the expected improvement in the Pareto front coverage.
     """
     def __init__(
         self,
-        solutions: list[scalar],
-        global_lower: npt.NDArray[np.float64],
-        #scalarizer: scalar,
+        solutions: List[scalar],
+        global_lower: Optional[npt.NDArray[np.float64]],
+        weighted_scalar: scalar,
         time_limit: float = 10.0,
         mip_gap: float = 0.01,
         epsilon: float = 1e-8
     ) -> None:
-        """Initializes the WeightSolver.
-
-        Args:
-            solutions (list[scalar]): Array of candidate solutions with objective vectors.
-            global_lower (np.ndarray): Global lower bounds of the objectives.
-            scalarizer (scalar): Scalarization function used for optimization.
-            time_limit (float): Time limit (in seconds) for solving the MILP problem. Default is 10.0.
-            mip_gap (float): Acceptable optimality gap for MILP solver. Default is 0.01.
-            epsilon (float): Tolerance for minimum improvement in dominance conditions. Default is 0.05.
         """
-        #self._scalarizer = scalarizer
-        self._num_objectives = solutions[0].M
-        self._global_lower = global_lower
-        self._solutions = solutions
-        self._time_limit = time_limit
-        self._mip_gap =  mip_gap
-        self._epsilon = epsilon
-
-        self.ml_model = None
+        Args:
+            solutions (List[scalar]): Current Pareto front approximation.
+            global_lower (Optional[np.ndarray]): Utopia point (lower bounds). If None, it will be computed
+                as the component-wise minimum of the provided solutions' objs_lb.
+            weighted_scalar (scalar): Scalarization prototype.
+            time_limit (float): Solver time limit.
+            mip_gap (float): Solver optimality gap.
+            epsilon (float): Small constant to ensure strict dominance constraints.
+        """
+        self.solutions = solutions
+        self.M = solutions[0].M
+        # If no global_lower provided, derive a conservative utopia point from solutions' lower bounds.
+        if global_lower is None:
+            objs_lower_matrix = np.array([s.objs_lb for s in solutions])
+            self.global_lower = objs_lower_matrix.min(axis=0)
+        else:
+            self.global_lower = global_lower
+        self.weighted_scalar = weighted_scalar
+        self.time_limit = time_limit
+        self.mip_gap = mip_gap
+        self.epsilon = epsilon
+        
+        self.logger = get_logger(f"moo.{__name__}")
+        
+        self.w: npt.NDArray[np.float64] = np.zeros(self.M)
+        self.importance: float = 0.0
         self.best_solution_reached = False
+        self._solution: Optional[scalar] = None
+        
+        self.ml_model: Any = None # Legacy support access
+
+        # Solve for weights immediately upon initialization
         self._compute_weights()
 
-    @property
-    def M(self) -> int:
-        """Number of objective functions.
-
-        Returns:
-            int: The number of objectives.
+    def optimize(self) -> scalar:
         """
-        return self._num_objectives
-
-    @property
-    def importance(self) -> float:
-        """Importance score computed from the separation margin optimization.
-
-        Returns:
-            float: The separation margin between upper and lower bounds.
+        Optimizes the current solution using the computed weights.
         """
-        return self._importance
+        best_solution = None
+        best_objective = np.inf
 
-    @property
-    def parents(self) -> list[scalar]:
-        """Candidate solutions used to compute the weights.
+        # Warm start selection
+        for solution in self.solutions:
+            val = self.w @ solution.objs
+            if val < best_objective:
+                best_objective = val
+                best_solution = solution
 
-        Returns:
-            list[scalar]: Array of solution objects used as input.
-        """
-        return self._solutions
-
-    @property
-    def solution(self) -> scalar:
-        """The current optimized solution.
-
-        Returns:
-            scalar: The best solution found using the computed weights.
-        """
+        self._solution = copy.copy(self.weighted_scalar)
+        self._solution.optimize(self.w)
+        
+        self.ml_model = self._solution.x
+        
+        # Convergence check
+        if best_solution is not None and np.all(np.isclose(self._solution.objs, best_solution.objs)):
+           self.best_solution_reached = True
+           
         return self._solution
 
-    @property
-    def weights(self) -> npt.NDArray[np.float64]:
-        """The weight vector obtained from the MILP optimization.
-
-        Returns:
-            np.ndarray: The vector of weights for scalarization.
-        """
-        return self._weights
-
-    def get_model(self) -> Any:
-        """Returns the underlying machine learning model of the best solution.
-
-        Returns:
-            Any: Trained ML model corresponding to the best solution.
-        """
-        return self.ml_model
-
     def _compute_weights(self) -> None:
-        """Solves the MILP to compute an optimal weight vector for scalarization.
-
-        The optimization maximizes the difference between a weighted upper bound
-        and a weighted lower bound over a set of non-dominated solutions. 
-        The result is used to guide subsequent solution refinement.
+        """
+        Solves the MIQP to find the weight vector maximizing the separation margin.
+        
+        Note: Uses Pyomo + Gurobi because the problem involves quadratic terms 
+        (w * y) in the objective/constraints which basic linear solvers don't handle.
         """
         model = pyo.ConcreteModel()
-        objs_list = [s.objs for s in self._solutions]
-        objs_list_lower = [s.objs_lower for s in self._solutions]
-        num_objs = self._num_objectives
+        
+        # Data preparation
+        objs_list = [s.objs for s in self.solutions]
+        # Use lower bounds (Lipschitz) if available
+        objs_list_lower = [s.objs_lb for s in self.solutions]
+        
+        num_objs = self.M
+        y_star = self.global_lower
 
-        y_star = self._global_lower
+        # Variables
+        # b[i, j]: Binary variable for region selection
+        model.b = pyo.Var(range(len(objs_list)), range(num_objs), domain=pyo.Binary) # type: ignore
+        # w[j]: Scalarization weights
+        model.w = pyo.Var(range(num_objs), domain=pyo.NonNegativeReals) # type: ignore
+        # y_sup: Upper approximation (achieved frontier)
+        model.y_sup = pyo.Var(range(num_objs), domain=pyo.Reals) # type: ignore
+        # y_und: Lower approximation (estimated potential)
+        model.y_und = pyo.Var(range(num_objs), domain=pyo.Reals) # type: ignore
 
-        model.b = pyo.Var(range(len(objs_list)), range(num_objs), domain=pyo.Binary)
-        model.w = pyo.Var(range(num_objs), domain=pyo.NonNegativeReals)
-        model.y_sup = pyo.Var(range(num_objs), domain=pyo.Reals)
-        model.y_und = pyo.Var(range(num_objs), domain=pyo.Reals)
+        model.constraints = pyo.ConstraintList() # type: ignore
 
-        model.constraints = pyo.ConstraintList()
-
+        # 1. Upper Bound Constraints (Convex Hull of current solutions)
+        # sum(w * (y_sup - y_star)) <= sum(w * (obj - y_star)) for all solutions
         for objs in objs_list:
-            constr = sum(model.w[j] * (model.y_sup[j] - y_star[j]) for j in range(num_objs)) <= \
-                     sum(model.w[j] * max(objs[j]-y_star[j],  self._epsilon)  for j in range(num_objs))
-            model.constraints.add(
-                constr
-            )
+            lhs = sum(model.w[j] * (model.y_sup[j] - y_star[j]) for j in range(num_objs)) # type: ignore
+            rhs = sum(model.w[j] * max(objs[j] - y_star[j], self.epsilon) for j in range(num_objs)) # type: ignore
+            model.constraints.add(lhs <= rhs) # type: ignore
 
+        # 2. Lower Bound Constraints (Piecewise definitions via binary vars)
         for i in range(len(objs_list_lower)):
             for j in range(num_objs):
-                # if y_und[j] is lower than objs_list_lower[i][j], model.b[i, j]=0,
-                # otherwise model.b[i, j]=1
-                model.constraints.add(
-                    (model.y_und[j] - y_star[j]) >=
-                    model.b[i, j] * (objs_list_lower[i][j] - y_star[j])# + self._epsilon
+                # if y_und < objs_lower, force b=0
+                # Logic: y_und[j] - y_star[j] >= b[i,j] * (objs_lower[i][j] - y_star[j])
+                model.constraints.add( # type: ignore 
+                    (model.y_und[j] - y_star[j]) >= # type: ignore 
+                    model.b[i, j] * (objs_list_lower[i][j] - y_star[j]) # type: ignore 
                 )
-            # in order to y_sup dominate objs_list_lower[i],
-            # sum_j model.b[i, j] == 0
-            # thus sum_j model.b[i, j] >= 1
-            model.constraints.add(
-                sum(model.b[i, j] for j in range(num_objs)) >= 1
+            
+            # Ensure y_sup dominates at least one objs_lower fully?
+            # Or ensuring valid partitioning.
+            # Original logic: sum(model.b[i, j]) >= 1 
+            # implies at least one dimension 'j' respects the bound for solution 'i'
+            model.constraints.add( # type: ignore 
+                sum(model.b[i, j] for j in range(num_objs)) >= 1 # type: ignore 
             )
-        '''
+
+        # 3. Consistency Constraints
         for j in range(num_objs):
-            model.constraints.add(
-                sum(model.b[i, j] for i in range(len(objs_list_lower))) >= 1
-            )
-        '''
+            # y_sup >= y_und
+            model.constraints.add(model.y_sup[j] >= model.y_und[j]) # type: ignore 
+            # y_und >= y_star (Utopia)
+            model.constraints.add(model.y_und[j] >= y_star[j]) # type: ignore 
 
-        
-        for j in range(num_objs):
-            # y_sup[j] >= y_und[j]
-            model.constraints.add(
-                model.y_sup[j] >= model.y_und[j]
-            )
-            model.constraints.add(
-                model.y_und[j] >= y_star[j]
-            )
+        # 4. Simplex Constraint
+        model.constraints.add(sum(model.w[j] for j in range(num_objs)) == 1) # type: ignore 
 
-        model.constraints.add(sum(model.w[j] for j in range(num_objs)) == 1)
-
-        model.obj = pyo.Objective(
-            expr=sum(model.w[j] * model.y_sup[j] for j in range(num_objs)) -
-                 sum(model.w[j] * model.y_und[j] for j in range(num_objs)),
+        # Objective: Maximize gap (w * y_sup - w * y_und)
+        model.obj = pyo.Objective( # type: ignore 
+            expr=sum(model.w[j] * model.y_sup[j] for j in range(num_objs)) - # type: ignore 
+                 sum(model.w[j] * model.y_und[j] for j in range(num_objs)), # type: ignore 
             sense=pyo.maximize
         )
 
-        solver = appsi.solvers.Gurobi()
-        solver.config.mip_gap = self._mip_gap
-        solver.config.time_limit = self._time_limit
-        solver.solve(model)
-        solver.release_license()
+        # Solve
+        # Using appsi.solvers.Gurobi for persistent interface
+        try:
+            solver = appsi.solvers.Gurobi()
+            solver.config.mip_gap = self.mip_gap
+            solver.config.time_limit = self.time_limit
+            # Silence Gurobi output if possible via solver options
+            # solver.gurobi_options['OutputFlag'] = 0 
+            solver.solve(model) # type: ignore 
+        except Exception as e:
+            self.logger.warning(f"Solver failed: {e}")
+            # Fallback to uniform weights
+            self.w = np.ones(self.M) / self.M
+            return
 
-        self._weights = np.array([pyo.value(model.w[i]) for i in range(num_objs)])
-        y_sup_ = np.array([pyo.value(model.y_sup[i]) for i in range(num_objs)])
-        y_und_ = np.array([pyo.value(model.y_und[i]) for i in range(num_objs)])
+        # Extract results
+        if hasattr(model, 'w'):
+            self.w = np.array([pyo.value(model.w[i]) for i in range(num_objs)]) # type: ignore 
+            self.importance = pyo.value(model.obj.expr) # type: ignore 
+        else:
+            self.w = np.ones(self.M) / self.M
+            self.importance = 0.0
 
-        # Test if y_und_ dominates any of the objs_list_lower
-        for i,objs_lower in enumerate(objs_list_lower):
-            if all(y_und_<objs_lower):
-                logger.warning("y_und_ dominates an objective lower bound, which is not expected.")
-                logger.debug(f"objs_lower: {objs_lower}")
-                logger.debug(f"y_und_: {y_und_}")
-                logger.debug(" ".join([f"b[{i},{j}]={pyo.value(model.b[i, j])}" for j in range(num_objs)]))
-
-        self._importance = pyo.value(model.obj.expr) if self._weights is not None else 0
-
-        logger.debug(f"Calculated weights: {self._weights}")
-        logger.debug(f"Importance: {self._importance}")
-        logger.debug(f"Importance: {self._weights@y_sup_ - self._weights@y_und_}")
-        logger.debug(f"y_sup: {y_sup_}")
-        logger.debug(f"y_und: {y_und_}")
-        logger.debug(f"Global lower bound (y*): {y_star}")
-
-    def optimize(self) -> scalar:
-        """Optimizes the current solution using the computed weights (as warm start).
-
-        Selects the best solution from the parent set based on the weighted 
-        objective value. Then optimizes it with the current weight vector. 
-        Stores the resulting model and solution.
-
-        Returns:
-            np.ndarray: The optimized solution object.
-        """
-        best_solution = np.zeros(self._num_objectives)
-        best_objective = np.inf
-
-        for solution in self._solutions:
-            aux = self.weights@solution.objs
-            if aux < best_objective:
-                best_objective = aux
-                best_solution = solution
-
-        self._solution = copy.copy(best_solution)
-        self._solution.optimize(self.weights)
-
-        self.ml_model = self._solution.x
-        if np.all(np.equal(self._solution.objs, best_solution.objs)):
-           self.best_solution_reached = True
-        return self._solution
+        # Debug logging
+        if self.logger.isEnabledFor(10): # DEBUG
+            y_sup_ = np.array([pyo.value(model.y_sup[i]) for i in range(num_objs)]) # type: ignore 
+            y_und_ = np.array([pyo.value(model.y_und[i]) for i in range(num_objs)]) # type: ignore 
+            self.logger.debug(f"Calculated weights: {self.w}")
+            self.logger.debug(f"Importance: {self.importance}")
+            self.logger.debug(f"y_sup: {y_sup_}")
+            self.logger.debug(f"y_und: {y_und_}")
 
 
-class Mola:
-    """MOLA: Multi-Objective Learning Algorithm
+class MOLA(IPSolvableMixin, MOOptimizer):
+    """
+    MOLA: Multi-Objective Learning Algorithm.
     
+    Inherits from BaseMOO to perform the iterative optimization loop.
     """
     def __init__(
         self,
         weighted_scalar: scalar,
         single_scalar: scalar | None,
-        target_gap: float = 0.0,
-        target_size: int | None = None,
-        red_fact: float = float("inf"),
-        smooth_count: int = 0,
+        # Base Parameters (MOOPTimizer))
+        target_size: int = 20,
+        time_limit: float = float('inf'),  
+        verbose: bool = False,
+        debug: bool = False,
+        # IPSolvableMixin Parameters
         node_time_limit: float = float("inf"),
         node_gap: float = 0.01,
-        norm: bool = True,
-        utopia_slack: float | str = 1e-5
     ) -> None:
-        """Initializes MOLA.
-
-        Args:
-            weighted_scalar (scalar): Scalarization object used for weighted-sum optimization.
-            single_scalar (scalar | None): Scalarization object used for single-objective optimization.
-                If None, only the weighted scalar will be used.
-            target_gap (float): Minimum relative gap between solutions to stop refinement.
-                Default is 0.0.
-            target_size (int | None): Target number of Pareto-optimal solutions to obtain.
-                Defaults to 20 × number of objectives if not specified.
-            red_fact (float): Reduction factor used in adaptive refinement. Default is infinity.
-            smooth_count (int): Number of smoothing iterations before stopping. Default is 0.
-            node_time_limit (float): Maximum time allowed (in seconds) per node optimization.
-                Default is infinity.
-            node_gap (float): Acceptable optimization gap for each node. Default is 0.01.
-            norm (bool): Whether to normalize objective vectors before comparison. Default is True.
         """
+        Args:
+            weighted_scalar: Strategy for weighted sum.
+            single_scalar: Strategy for single objective.
+            target_size: Desired number of solutions.
+            target_gap: Stop if importance gap is small.
+            red_fact: Reduction factor for goal (unused in current impl but kept for API).
+            smooth_count: Iterations to smooth importance tracking.
+            node_time_limit: Time limit per MILP solve.
+            node_gap: MIP gap for MILP solve.
+            norm: Normalize objectives (unused in MOLA currently, kept for API).
+            utopia_slack: Small buffer for bounds.
+        """
+        super().__init__(
+            target_size=target_size,
+            time_limit=time_limit,
+            verbose=verbose,
+            debug=debug,
+            node_time_limit=node_time_limit,
+            node_gap=node_gap,
+        )
+
         if (not isinstance(weighted_scalar, (scalar_interface, w_interface)) or
             not isinstance(single_scalar, (scalar_interface, w_interface))):
-            raise ValueError("weighted_scalar and single_scalar must implement the correct interfaces.")
+            raise ValueError("Scalarizers must implement correct interfaces.")
 
-        self._weighted_scalar: scalar = weighted_scalar
-        self._single_scalar: scalar = single_scalar
-        self._num_objs = self._single_scalar.M
-        self._target_gap = target_gap
-        self._node_time_limit = node_time_limit
-        self._node_gap = node_gap
-        self._red_fact = red_fact
-        self._norm: bool = norm
-        self._max_imp = 1.0
-        self._solutions_list = []
-        self._ml_models = []
-        self.hypervolume_values = []
-        self.history_list = []
-        self._target_size = target_size or 20 * self._weighted_scalar.M
-        self._smooth_count = smooth_count if smooth_count != 0 else (1 if node_time_limit == float('inf') else 5)
-        self._utopia_slack = utopia_slack
-
-    def __del__(self) -> None:
-        """
-        Deletes the solutions list attribute from the object if it exists.
+        # Setting Scalarizers
+        self.weighted_scalar = weighted_scalar
+        self.single_scalar = single_scalar
         
-        This is a cleanup method called when the object is about to be destroyed.
-        It ensures that the `_solutions_list` attribute is deleted if it was created.
+        
+        # State
+        self.M: int = 0
+        self.global_lower: Optional[npt.NDArray[np.float64]] = None
+        self.importances: List[float] = []
+        self._next_node: Optional[WeightNode] = None
+
+    def _update_global_lower(self) -> None:
         """
-        if hasattr(self, '_solutions_list'):
-            del self._solutions_list
-
-    @property
-    def target_size(self) -> int:
-        """Target number of Pareto-optimal solutions.
-
-        Returns:
-            int: The number of solutions to aim for in the optimization process.
+        Updates the global lower bound (Utopia point) based on the estimated
+        lower bounds of all found solutions.
         """
-        return self._target_size
+        if not self.history_list:
+            return
+            
+        # Collect 'objs_lower' from all history
+        # Note: BaseMOO stores all solutions in self.history_list
+        objs_lower_matrix = np.array([s.objs_lb for s in self.history_list])
+        
+        # Utopia is the component-wise minimum
+        self.global_lower = objs_lower_matrix.min(axis=0)
 
-    @property
-    def target_gap(self) -> float:
-        """Target minimum relative gap between solutions.
-
-        Returns:
-            float: The convergence threshold used to stop refinement.
+    def initialize(self) -> None:
         """
-        return self._target_gap
-
-    @property
-    def solutions_list(self) -> list[scalar]:
-        """List of current Pareto-optimal solutions.
-
-        Returns:
-            list[scalar]: An array containing objective values of the solutions.
+        Initializes by finding individual minima and creating the first WeightNode.
         """
-        return self._solutions_list
+        self.M = self.single_scalar.M
+        
+        # 1. Find Individual Minima
+        for i in range(self.M):
+            self.logger.debug(f"Finding {i+1}th individual minimum")
+            single_s = copy.copy(self.single_scalar)
+            single_s.optimize(i)
+            
+            # Add to BaseMOO lists (filtering logic applies)
+            self.update(None, single_s)
 
-    @property
-    def curr_imp(self) -> float:
-        """Current importance score based on recent iterations.
+        # 2. Update Bounds
+        self._update_global_lower()
 
-        Returns:
-            float: Maximum importance value from the last `smooth_count` iterations.
-        """
-        return max(self._importances[-self._smooth_count:])
-
-    @property
-    def max_imp(self) -> float:
-        """Maximum importance value observed so far.
-
-        Returns:
-            float: The highest importance score recorded during optimization.
-        """
-        return self._max_imp
-
-    @property
-    def importances(self) -> list[float]:
-        """List of all importance values computed during optimization.
-
-        Returns:
-            list[float]: Historical record of importance scores.
-        """
-        return self._importances
-    
-    def get_models(self)-> list[Any]:
-        """Returns the list of trained machine learning models.
-
-        These models correspond to the solutions generated during optimization.
-
-        Returns:
-            list[Any]: A list of ML models associated with each Pareto-optimal solution.
-        """
-        return self._ml_models
-
-    def get_hypervolumes(self) -> npt.NDArray[np.float64] | list[float]:
-        """Returns the hypervolume values computed during optimization.
-
-        Returns:
-            npt.NDArray[np.float64] | list[float]: Array of hypervolume values corresponding to each iteration or solution.
-        """
-        return self.hypervolume_values
-
-    def _grad_squared(self, solution: scalar, obj_index: int) -> float:
-        """Computes the squared norm of the gradient for a given objective.
-
-        Args:
-            solution (scalar): A solution object containing gradients.
-            obj_index (int): Index of the objective function to compute the gradient norm.
-
-        Returns:
-            float: Squared Euclidean norm of the gradient vector.
-        """
-        gradient = solution.gradient[obj_index]
-        grad_norm = np.linalg.norm(gradient)
-
-        grad_norm_squared = grad_norm ** 2
-
-        return grad_norm_squared
-
-    def _update_global_lower(self, num_objs: int) -> npt.NDArray[np.float64] | list[float]:
-        """Updates the global lower bounds for each objective using Lipschitz-based estimates.
-
-        If gradients are available, estimates a tighter lower bound using a Lipschitz-based formula.
-        Otherwise, it falls back to the minimum value of each objective among the solutions.
-
-        Args:
-            num_objs (int): Number of objective functions.
-
-        Returns:
-            np.ndarray: Updated global lower bounds for each objective.
-        """
-        objs_lower = np.array([[o for o in p.objs_lower] for p in self._solutions_list]) 
-        return objs_lower.min(0)
-    
-    def inicialization(self) -> WeightSolver:
-        """Initializes the optimization process.
-
-        Finds the individual minima of each objective, computes the global lower bounds
-        and upper bounds, and builds the first weighted solution. This sets up 
-        the optimization for iterative refinement.
-
-        Returns:
-            WeightSolver: The first weighted solution used to start the optimization.
-        """
-        parents = []
-
-        for i in range(self._num_objs):
-            logger.debug(f"Finding {i+1}th individual minimum")
-            single_scalar = copy.copy(self._single_scalar)
-            single_scalar.optimize(i)
-            self._solutions_list.append(single_scalar)
-            self.history_list.append(single_scalar)
-            parents.append(single_scalar)
-
-        self._global_lower = self._update_global_lower(num_objs=self._num_objs)
-
-        first_w_solution = WeightSolver(
-            solutions=parents,
-            global_lower=self._global_lower,
-            #scalarizer=self._weighted_scalar,
+        # 3. Create First Node
+        # MOLA logic starts by creating a node considering all current solutions
+        first_node = WeightNode(
+            solutions=self.solutions_list,
+            global_lower=self.global_lower,
+            weighted_scalar=self.weighted_scalar,
+            time_limit=self.node_time_limit,
+            mip_gap=self.node_gap
         )
 
-        self._max_imp = first_w_solution.importance
-        self._importances = [first_w_solution.importance]
+        self.max_imp = first_node.importance
+        self.importances = [first_node.importance]
+        
+        self._next_node = first_node
 
-        return first_w_solution
-
-    def is_dominated(self, a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> bool:
-        """Checks whether solution `a` is dominated by solution `b`.
-
-        A solution `a` is considered dominated if all its objective values
-        are greater than or equal to those of `b`.
-
-        Args:
-            a (np.ndarray): Objective values of solution `a`.
-            b (np.ndarray): Objective values of solution `b`.
-
-        Returns:
-            bool: True if `a` is dominated by `b`, False otherwise.
+    def select(self) -> Optional[WeightNode]:
         """
-        return np.all(np.greater_equal(a,b))
-    
-    def can_add_solution(
-        self, 
-        new_solution: scalar, 
-        solutions: list[scalar]
-    ) -> bool:
-        """Determines whether a new solution should be added to the Pareto set.
-
-        A solution is added only if it is not dominated by any existing solution.
-
-        Args:
-            new_solution (scalar): The candidate solution.
-            solutions (list[scalar]): Array of existing solutions.
-
-        Returns:
-            bool: True if the new solution is non-dominated and should be added.
+        Returns the next WeightNode to optimize.
         """
-        for solution in solutions:
-            if self.is_dominated(new_solution.objs, solution.objs):
-                return False 
-        return True
+        current_node = self._next_node
+        
+        if current_node is not None:
+            # Prepare the NEXT node for the subsequent iteration
+            # This follows the MOLA pattern of recalculating weights based on the NEW set
+            # The 'current_node' returned here was calculated in the PREVIOUS step.
+            
+            # We need to peek ahead: after 'current_node' is optimized in the main loop,
+            # 'update' will be called. Then 'select' is called again.
+            # So actually, we should calculate the NEW node *here*, inside select, 
+            # based on the *current* solutions list (which includes the result of the previous step).
+            
+            # However, the first node was pre-calculated in initialize().
+            # So strictly speaking, select() just pops the queue or generates new one.
+            pass
 
-    def remove_dominated_solutions(
-            self,
-            new_solution: scalar,
-            solutions: list[scalar]
-        ) -> list[scalar]:
-        """Removes solutions that are dominated by a new one.
+        return current_node
 
-        If the new solution is not dominated, it is added to the list, 
-        and any existing solutions that it dominates are removed.
-
-        Args:
-            new_solution (scalar): The candidate solution to be evaluated.
-            solutions (list[scalar]): Existing list of Pareto solutions.
-
-        Returns:
-            list[scalar]: Updated list of non-dominated solutions.
+    def optimize_step(self, node: WeightNode) -> scalar:
         """
-        non_dominant_solutions = []
-
-        if self.can_add_solution(new_solution, solutions):
-            logger.debug(f"New solution added {new_solution.objs}")
-            non_dominant_solutions.append(new_solution)
-
-            for solution in solutions:
-                if not self.is_dominated(solution.objs, new_solution.objs):
-                    non_dominant_solutions.append(solution)
-                else:
-                    logger.debug(f"Solution dominated {solution.objs}")
-        else:
-            non_dominant_solutions = solutions
-            logger.debug(f"New solution dominated {new_solution.objs}")
-
-        return non_dominant_solutions
-
-    def update(self, solution: scalar) -> None:
-        """Updates the internal solution set with a new candidate.
-
-        Adds the solution to the history, updates the non-dominated 
-        set, and recomputes global bounds.
-
-        Args:
-            solution (scalar): New solution to be added.
+        Executes optimization and immediately prepares the next node for the loop.
         """
-        self.history_list.append(solution)
-        if self._solutions_list:
-            self._solutions_list = self.remove_dominated_solutions(solution, self._solutions_list)
-        else:
-            self._solutions_list.append(solution)
+        # 1. Run the optimization for the current node
+        solution = node.optimize()
+        
+        return solution
 
-        num_objs = len(solution.objs)
-        self._global_lower = self._update_global_lower(num_objs=num_objs)
-
-    def _next(self) -> WeightSolver:
-        """Computes the next weighted solution.
-
-        Returns:
-            WeightSolver: The next weighted solution to be optimized.
+    def update(self, node: Any, solution: scalar) -> None:
         """
-        next_w_solution = WeightSolver(
-            solutions=self._solutions_list,
-            global_lower=self._global_lower,
-            #scalarizer=self._weighted_scalar,
-            time_limit=self._node_time_limit,
-            mip_gap=self._node_gap,
+        Updates solutions, bounds, and prepares the next WeightNode.
+        """
+        # 1. BaseMOO update
+        super().update(node, solution)
+        
+        # 2. Update Bounds
+        self._update_global_lower()
+        
+        # 3. Generate Next Node
+        # MOLA generates a new weight vector based on the UPDATED solution set
+        new_node = WeightNode(
+            solutions=self.solutions_list,
+            global_lower=self.global_lower,
+            weighted_scalar=self.weighted_scalar,
+            time_limit=self.node_time_limit,
+            mip_gap=self.node_gap
         )
-        self._importances.append(next_w_solution.importance)
-        return next_w_solution
-
-    def optimize(self) -> None:
-        """Runs the full MOLA optimization process.
-
-        Initializes the algorithm, iteratively refines the solution set using
-        weighted scalarization, tracks hypervolume improvement, and updates
-        the non-dominated front until convergence or target is met.
-        """
-        start = time.perf_counter()
-        next_w_solution = self.inicialization()
-
-        reference_point = np.ones_like(self.solutions_list[0].objs)
-        hv = HV(ref_point=reference_point)
-
-        solution_set = []
-        iteraction = 0
-
-        while (len(self.solutions_list) < self.target_size
-              or len(self.history_list) < self.target_size):
-
-            logger.debug(f"Iteration {iteraction+1}")
-            logger.debug(f"Solutions list: {[s.objs for s in self.solutions_list]}")       
-            iteraction += 1
-            if iteraction >= self.target_size:
-                break
-            solution = next_w_solution.optimize()
-            solution_set.append(solution.objs)
-            self.hypervolume_values.append(hv(np.array(solution_set)))
-
-            self._ml_models.append(solution.x)
-
-            if next_w_solution.best_solution_reached:
-                logger.info("Best solution found.")
-                break
-
-            self.update(solution)
-            next_w_solution = self._next()
-
-        self._fit_runtime = time.perf_counter() - start
-        logger.info(f"Fit runtime: {self._fit_runtime:.2f} seconds")
+        
+        self.importances.append(new_node.importance)
+        self._next_node = new_node

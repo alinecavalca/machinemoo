@@ -10,8 +10,8 @@ from .scalarization.old_lipschitz_estimatation import (
     calculate_logreg_lipschitz_constant, 
     calculate_l2_regularization_lipschitz_constant,
 )
-from .moo.mola import Mola
-from .moo.nise import nise
+from .moo.old_mola import Mola
+from .moo.nise import NISE
 from .moo.old_monise import monise
 from .moo.old_random_weights import random_weights
 from .moo.old_moo_handler import get_objectives

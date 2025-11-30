@@ -107,7 +107,7 @@ class w_interface(scalar_interface, metaclass=ABCMeta):
     # - propertys
     @property
     @abstractmethod
-    def w(self) -> int | npt.NDArray[np.float64]:
+    def w(self) -> npt.NDArray[np.float64]:
         """
         Abstract property to get the weights of the problem.
         
@@ -122,7 +122,7 @@ class single_interface(scalar_interface, metaclass=ABCMeta):
     # - propertys
     @property
     @abstractmethod
-    def w(self) -> int | npt.NDArray[np.float64]: 
+    def w(self) -> npt.NDArray[np.float64]: 
         """
         Abstract property to get the weights of the problem.
         
