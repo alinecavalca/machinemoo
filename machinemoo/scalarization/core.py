@@ -33,8 +33,8 @@ class BaseScalarizer(w_interface, single_interface, scalar_interface):
         self._M: int = num_objs
         self._x: Any = None
         self._gradient: Optional[npt.NDArray[np.float64]] = None
-        self._w: npt.NDArray[np.float64] = np.zeros(num_objs)
-        self._objs: npt.NDArray[np.float64] = np.zeros(num_objs)
+        self._w: npt.NDArray[np.float64] = np.ones(num_objs)/num_objs
+        self._objs: npt.NDArray[np.float64] = np.ones(num_objs)*np.inf
         
         self.lower_bound_estimate = lower_bound_estimate
         self._objs_lb: Optional[npt.NDArray[np.float64]] = None
@@ -159,12 +159,13 @@ class BaseScalarizer(w_interface, single_interface, scalar_interface):
         # Execute training
         result = self.training(self._w)
 
-        if len(result) == 2:
-            model, objs = result
+        if len(result) == 2 or len(result) == 3 and result[2] is None:
+            model, objs = result[:2]
             self._gradient = None
         elif len(result) == 3:
             model, objs, gradient = result
             self._gradient = gradient
+            assert self.L is not None
             self._w = solve_optimal_w_active_set(np.array(gradient), self.L)
         else:
             raise ValueError("training() must return a tuple of 2 or 3 elements (model, objs, [gradient])")

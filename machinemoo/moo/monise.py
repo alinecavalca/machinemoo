@@ -11,6 +11,61 @@ from machinemoo.scalarization.scalarization_interface import scalar_interface, w
 
 __all__ = ["MONISE"]
 
+class ExtremeNode:
+    def __init__(self, 
+                 dimension: int,
+                 solutions: List[scalar],
+                 weighted_scalar: scalar) -> None:
+    
+        self.dimension = dimension
+        self.solutions = solutions
+        self.M = weighted_scalar.M
+        self.weighted_scalar = weighted_scalar
+        self._calc_w()
+
+    def _calc_w(self) -> None:
+        """
+        For extreme nodes, set weight to focus entirely on the specific dimension.
+        """
+        w = np.zeros(self.M)
+        w[self.dimension] = 1.0
+        
+        self.w = w
+
+    def optimize(self) -> scalar:
+        """Otimiza a escalarização com o peso calculado."""
+        # Fallback de segurança se o solver falhou silenciosamente
+        assert self.w is not None, "Weight vector 'w' was not computed."
+
+        # Warm start logic (simplificado)
+        best_obj = self.w @ self.weighted_scalar.objs
+        best_sol = self.weighted_scalar
+
+        for s in self.solutions:
+            # Produto escalar seguro
+            val = self.w @ s.objs
+            if val < best_obj:
+                best_obj = val
+                best_sol = s
+        print(self.w)
+        self._solution = copy.deepcopy(best_sol)
+
+        print("Before optimize")
+        print(self._solution.objs)
+        print(self._solution.objs_lb)
+
+        self._solution.optimize(self.w)
+        print("After optimize")
+        
+        print(self._solution.objs)
+        print(self._solution.objs_lb)
+        print("----")
+        
+        if best_sol is not None and np.allclose(self._solution.objs, best_sol.objs):
+            self.best_solution_reached = True
+            
+        return self._solution    
+
 class WeightNode:
     """
     Resolve o problema de otimização de pesos do MONISE usando Pyomo.
@@ -53,7 +108,7 @@ class WeightNode:
         # Warm start logic (simplificado)
         best_obj = self.w @ self.weighted_scalar.objs
         best_sol = self.weighted_scalar
-        
+
         for s in self.solutions:
             # Produto escalar seguro
             val = self.w @ s.objs
@@ -61,8 +116,13 @@ class WeightNode:
                 best_obj = val
                 best_sol = s
 
-        self._solution = copy.copy(best_sol)
+        self._solution = copy.deepcopy(best_sol)
         self._solution.optimize(self.w)
+
+        print(self.w)
+        print(self._solution.objs)
+        print(self._solution.objs_lb)
+        print("----")
         
         if best_sol is not None and np.allclose(self._solution.objs, best_sol.objs):
             self.best_solution_reached = True
@@ -253,21 +313,24 @@ class MONISE(IPSolvableMixin, MOOptimizer):
         self.single_scalar = single_scalar
         
         # Setting State
-        self.M: int = 0
+        self.M: int = self.single_scalar.M
         self.global_lower: Optional[npt.NDArray[np.float64]] = None
         self.global_upper: Optional[npt.NDArray[np.float64]] = None
         self.importances: List[float] = []
         self._next_node: Optional[WeightNode] = None
 
-    def initialize(self) -> None:
-        self.M = self.single_scalar.M
-        
-        # 1. Encontrar Mínimos Individuais
+    def initialize(self) -> None:        
+        print("MONISE Initialization:")
+
         for i in range(self.M):
-            single_s = copy.copy(self.single_scalar)
             self.logger.debug(f"Finding {i+1}th individual minima")
-            single_s.optimize(i)
-            self.update(single_s, None)
+            node = ExtremeNode(
+                dimension=i,
+                solutions=self.solutions_list,
+                weighted_scalar=self.weighted_scalar,
+            )
+            extreme_solution = node.optimize()
+            self.update(extreme_solution, None)
 
         # 2. Calcular Limites Globais
         objs_lb_matrix = np.array([s.objs_lb for s in self.history_list])
@@ -276,36 +339,24 @@ class MONISE(IPSolvableMixin, MOOptimizer):
         objs_matrix = np.array([s.objs for s in self.history_list])
         self.global_upper = objs_matrix.max(axis=0)
 
-        # 3. Criar Primeiro Nó (Otimização Linear Inicial)
-        first_node = WeightNode(
+    def select(self) -> Optional[WeightNode]:
+        if len(self.solutions_list) < self.M:
+            self.initialize()
+
+        new_node = WeightNode(
             solutions=self.solutions_list,
             global_lower=cast(npt.NDArray[np.float64], self.global_lower),
             global_upper=cast(npt.NDArray[np.float64], self.global_upper),
             weighted_scalar=self.weighted_scalar,
+            time_limit=self.node_time_limit,
+            mip_gap=self.node_gap,
         )
-        
-        self.importances = [first_node.importance]
-        self._next_node = first_node
+        self.importances.append(new_node.importance)
 
-    def select(self) -> Optional[WeightNode]:
-        current_node = self._next_node
-        
-        # Prepara o próximo nó (Lookahead do algoritmo MONISE)
-        if current_node is not None:
-            new_node = WeightNode(
-                solutions=self.solutions_list,
-                global_lower=cast(npt.NDArray[np.float64], self.global_lower),
-                global_upper=cast(npt.NDArray[np.float64], self.global_upper),
-                weighted_scalar=self.weighted_scalar,
-                time_limit=self.node_time_limit,
-                mip_gap=self.node_gap,
-            )
-            self.importances.append(new_node.importance)
-            self._next_node = new_node
-
-        return current_node
+        return new_node
 
     def update(self, solution: scalar, node: Any) -> None:
         super().update(solution, node)
         if self.global_lower is not None:
             self.global_lower = np.minimum(self.global_lower, solution.objs_lb)
+        

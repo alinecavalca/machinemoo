@@ -13,7 +13,7 @@ from machinemoo.scalarization.lipschitz_estimation import (
 )
 from machinemoo.utils.torch_helpers import get_logistic_gradient
 from machinemoo.utils.typing import MatrixLike
-from machinemoo import get_logger
+from machinemoo.utils import get_logger
 
 ArrayLike = npt.ArrayLike
 

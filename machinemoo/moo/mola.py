@@ -16,7 +16,7 @@ from typing import Any, List, Optional
 import pyomo.environ as pyo
 from pyomo.contrib import appsi
 
-from machinemoo import get_logger
+from machinemoo.utils import get_logger
 from machinemoo.moo.core import MOOptimizer, IPSolvableMixin
 from machinemoo.utils.typing import scalar
 from machinemoo.scalarization.scalarization_interface import scalar_interface, w_interface
@@ -80,23 +80,23 @@ class WeightNode:
         """
         Optimizes the current solution using the computed weights.
         """
-        best_solution = None
-        best_objective = np.inf
+        best_obj = self.w @ self.weighted_scalar.objs
+        best_sol = self.weighted_scalar
 
         # Warm start selection
         for solution in self.solutions:
             val = self.w @ solution.objs
-            if val < best_objective:
-                best_objective = val
-                best_solution = solution
+            if val < best_obj:
+                best_obj = val
+                best_sol = solution
 
-        self._solution = copy.copy(self.weighted_scalar)
+        self._solution = copy.deepcopy(best_sol)
         self._solution.optimize(self.w)
         
         self.ml_model = self._solution.x
         
         # Convergence check
-        if best_solution is not None and np.all(np.isclose(self._solution.objs, best_solution.objs)):
+        if best_sol is not None and np.all(np.isclose(self._solution.objs, best_sol.objs)):
            self.best_solution_reached = True
            
         return self._solution
@@ -289,7 +289,7 @@ class MOLA(IPSolvableMixin, MOOptimizer):
             single_s.optimize(i)
             
             # Add to BaseMOO lists (filtering logic applies)
-            self.update(None, single_s)
+            self.update(single_s, None)
 
         # 2. Update Bounds
         self._update_global_lower()
@@ -340,12 +340,12 @@ class MOLA(IPSolvableMixin, MOOptimizer):
         
         return solution
 
-    def update(self, node: Any, solution: scalar) -> None:
+    def update(self, solution: scalar, node: Any) -> None:
         """
         Updates solutions, bounds, and prepares the next WeightNode.
         """
         # 1. BaseMOO update
-        super().update(node, solution)
+        super().update(solution, node)
         
         # 2. Update Bounds
         self._update_global_lower()

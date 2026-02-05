@@ -78,12 +78,7 @@ class WeightNode:
                     best_solution = solution
 
         # Setup and run scalarization
-        self._solution = copy.copy(best_solution)
-        
-        # If we found a warm start, we could potentially set it here 
-        # (dependent on scalarizer implementation support for x_init)
-        # For now, we just proceed to optimize.
-        
+        self._solution = copy.deepcopy(best_solution)        
         self._solution.optimize(self.w)
 
         # Check if we just retrieved an existing solution (convergence check)

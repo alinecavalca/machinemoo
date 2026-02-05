@@ -91,7 +91,7 @@ class WeightNode:
                 best_obj = val
                 best_sol = s
 
-        self._solution = copy.copy(best_sol)
+        self._solution = copy.deepcopy(best_sol)
         self._solution.optimize(self.w)
         
         return self._solution

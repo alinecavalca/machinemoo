@@ -123,7 +123,7 @@ class MOOptimizer(ABC):
             return True
         return False
 
-    def optimize_step(self, node: Any) -> scalar_interface:
+    def optimize_step(self, node: Any) -> Any:
         """Executes the optimization on the given node."""
         return node.optimize()
 
